@@ -1,0 +1,7 @@
+*.bin
+*.exe
+*.pdb
+*.dSYM
+/extreme_fft
+/tests/tests
+/benchmark/benchmark
