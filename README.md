@@ -52,7 +52,7 @@ odin build . -define:EXTREME_FFT_FMA=true -microarch:native
 
 #### Tests
 
-Against a plain radix-2 FFT in f64, every power of two from 128 to 65536 (from 64 for four at once), with and without fused multiply-adds:
+Every way of computing a transform against a plain radix-2 FFT in f64, every power of two from 128 to 65536 (from 64 for four at once), and against the definition of the DFT alone: a direct sum in f64 up to 2048, an impulse, all ones and alternating ±1 (DC and Nyquist), tones on whole bins, Parseval's theorem and the shift theorem. The largest error is 3.5e-7 of the largest bin, the impulse, all ones and alternating ±1 come out exact. With and without fused multiply-adds:
 
 ```
 odin test tests
