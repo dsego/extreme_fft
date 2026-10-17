@@ -556,7 +556,7 @@ lane :: #force_inline proc "contextless" (v: F32x4, $LANE: int) -> F32x4 {
 }
 
 // The four lanes in reverse order
-@(private = "file")
+@(private)
 reverse :: #force_inline proc "contextless" (v: F32x4) -> F32x4 {
     return simd.swizzle(v, 3, 2, 1, 0)
 }

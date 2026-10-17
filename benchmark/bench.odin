@@ -23,6 +23,7 @@ RUNS :: 5
 Args :: struct {
     plan:     ^fft.Plan,
     plan4:    ^fft.Plan4,
+    quad:     ^fft.Quad_Plan,
     samples:  []f32,
     spectrum: []complex64,
     re, im:   []f32,
@@ -62,6 +63,10 @@ main :: proc() {
         row("extreme FFT", best_of(proc(a: ^Args) { fft.run(a.plan, a.samples, a.spectrum) }, &Args{plan = &plan, samples = samples, spectrum = spectrum}))
         row("extreme, arrays", best_of(proc(a: ^Args) { fft.run_arrays(a.plan, a.samples, a.re, a.im) }, &Args{plan = &plan, samples = samples, re = re, im = im}))
         row("extreme, 4 lanes", best_of(proc(a: ^Args) { fft.run4(a.plan4, a.samples, a.re) }, &Args{plan4 = &plan4, samples = interleaved, re = four_spectra}) / 4)
+        quad := fft.create_quad_plan(size)
+        defer fft.destroy_quad_plan(&quad)
+        row("quad", best_of(proc(a: ^Args) { fft.run_quad(a.quad, a.samples, a.spectrum) }, &Args{quad = &quad, samples = samples, spectrum = spectrum}))
+        row("quad, arrays", best_of(proc(a: ^Args) { fft.run_quad_arrays(a.quad, a.samples, a.re, a.im) }, &Args{quad = &quad, samples = samples, re = re, im = im}))
 
         when ODIN_OS == .Darwin {
             log2n := uint(0)

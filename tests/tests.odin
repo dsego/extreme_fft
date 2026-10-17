@@ -102,6 +102,39 @@ test_run4 :: proc(t: ^testing.T) {
     }
 }
 
+// One transform done as four, both outputs
+@(test)
+test_run_quad :: proc(t: ^testing.T) {
+    for size := 256; size <= 65536; size *= 2 {
+        samples, expected := signal(size)
+        defer delete(samples)
+        defer delete(expected)
+        plan := fft.create_quad_plan(size)
+        defer fft.destroy_quad_plan(&plan)
+
+        spectrum := make([]complex64, size / 2)
+        defer delete(spectrum)
+        fft.run_quad(&plan, samples, spectrum)
+        got := make([]complex128, size / 2 + 1)
+        defer delete(got)
+        got[0] = complex(f64(real(spectrum[0])), 0)
+        got[size / 2] = complex(f64(imag(spectrum[0])), 0)
+        for k in 1 ..< size / 2 do got[k] = complex128(spectrum[k])
+        error := relative_error(got, expected)
+        testing.expectf(t, error < TOLERANCE, "run_quad, N = %v: %.2e of the largest bin", size, error)
+
+        re, im := make([]f32, size / 2), make([]f32, size / 2)
+        defer delete(re)
+        defer delete(im)
+        fft.run_quad_arrays(&plan, samples, re, im)
+        got[0] = complex(f64(re[0]), 0)
+        got[size / 2] = complex(f64(im[0]), 0)
+        for k in 1 ..< size / 2 do got[k] = complex(f64(re[k]), f64(im[k]))
+        error = relative_error(got, expected)
+        testing.expectf(t, error < TOLERANCE, "run_quad_arrays, N = %v: %.2e of the largest bin", size, error)
+    }
+}
+
 // A plan used again and again gives the same bins, its buffers carry nothing over
 @(test)
 test_repeat :: proc(t: ^testing.T) {

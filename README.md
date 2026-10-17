@@ -31,6 +31,15 @@ defer fft.destroy_plan4(&plan)
 fft.run4(&plan, interleaved, spectrum) // 4·N floats in, 4·N floats out
 ```
 
+[quad.odin](quad.odin) does one transform as four. A signal read four samples at a time is four signals interleaved, x[4i + l] in lane l, so `run4` takes it as it is, and one more pass puts the four quarter length spectra together. The only reshuffle left is a 4×4 transpose in that pass. Faster than `run` at every size, N from 256, same outputs:
+
+```odin
+plan := fft.create_quad_plan(4096)
+defer fft.destroy_quad_plan(&plan)
+fft.run_quad(&plan, samples, spectrum)  // like run
+fft.run_quad_arrays(&plan, samples, re, im)  // like run_arrays
+```
+
 
 #### Fused multiply-adds
 
@@ -59,14 +68,16 @@ Against Apple's vDSP on macOS, which takes the samples split into even and odd o
 ➜ odin run benchmark -o:speed -microarch:native
 ```
 
-| N | extreme FFT | extreme, arrays | extreme, 4 lanes | vDSP FFT | vDSP DFT | vDSP FFT, 4 at once |
-|---|---|---|---|---|---|---|
-| 512 | 0.339 | 0.334 | 0.172 | 0.243 | 0.234 | 0.248 |
-| 1024 | 0.538 | 0.528 | 0.436 | 0.499 | 0.489 | 0.506 |
-| 2048 | 1.199 | 1.177 | 0.890 | 1.079 | 1.080 | 1.090 |
-| 4096 | 2.412 | 2.370 | 2.287 | 2.274 | 2.261 | 2.387 |
-| 8192 | 5.293 | 5.254 | 5.252 | 4.899 | 5.056 | 5.454 |
-| 16384 | 12.851 | 12.949 | 12.736 | 10.861 | 12.015 | 11.383 |
-| 32768 | 32.406 | 37.356 | 25.132 | 27.080 | 29.772 | 27.109 |
+| N | `run` | `run_arrays` | `run_quad` | `run_quad_arrays` | `run4`, a transform | vDSP FFT | vDSP DFT | vDSP FFT, 4 at once |
+|---|---|---|---|---|---|---|---|---|
+| 512 | 0.385 | 0.338 | 0.221 | 0.218 | 0.174 | 0.244 | 0.236 | 0.256 |
+| 1024 | 0.552 | 0.545 | 0.527 | 0.523 | 0.442 | 0.506 | 0.499 | 0.517 |
+| 2048 | 1.231 | 1.199 | 1.011 | 0.992 | 0.910 | 1.116 | 1.119 | 1.119 |
+| 4096 | 2.457 | 2.430 | 2.400 | 2.362 | 2.364 | 2.360 | 2.345 | 2.464 |
+| 8192 | 5.680 | 5.443 | 5.106 | 5.108 | 5.393 | 4.957 | 5.273 | 5.659 |
+| 16384 | 13.250 | 13.565 | 12.667 | 12.629 | 13.440 | 11.251 | 12.536 | 11.991 |
+| 32768 | 35.519 | 40.204 | 27.256 | 27.944 | 25.952 | 27.988 | 31.320 | 28.060 |
 
-Four at once is 11–27% faster than vDSP up to 2048. From 4096 its buffers, four transforms' worth, are larger than the M1's 128 KB data cache, and from 16384 a single transform's are too. strobe-tuner's own pffft build is 1–19% slower than the extreme FFT from 4096 to 65536.
+One transform as four is about level with vDSP, ahead at 512, 2048 and 32768, 1–13% behind between. Four at once is faster than vDSP up to 2048. From 4096 its buffers, four transforms' worth, are larger than the M1's 128 KB data cache, and from 16384 a single transform's are too. strobe-tuner's own pffft build is 1–19% slower than `run` from 4096 to 65536.
+
+Tried and slower: splitting a transform into rows and columns that each fit the data cache (four step), the twiddles in tangent form, radix-8. fft-fun's `benchmark_stages/LOG.md` has the earlier ones.
