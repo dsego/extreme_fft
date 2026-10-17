@@ -18,6 +18,7 @@ foreign accelerate {
     vDSP_create_fftsetup :: proc(log2n: uint, radix: i32) -> rawptr ---
     vDSP_destroy_fftsetup :: proc(setup: rawptr) ---
     vDSP_fft_zrip :: proc(setup: rawptr, c: ^DSPSplitComplex, stride: int, log2n: uint, direction: i32) ---
+    vDSP_fftm_zrip :: proc(setup: rawptr, c: ^DSPSplitComplex, stride, fft_stride: int, log2n, count: uint, direction: i32) ---
     vDSP_ctoz :: proc(c: [^]f32, ic: int, z: ^DSPSplitComplex, iz: int, n: uint) ---
 
     vDSP_DFT_zrop_CreateSetup :: proc(previous: rawptr, length: uint, direction: i32) -> rawptr ---

@@ -87,9 +87,18 @@ create_plan :: proc(size: int, allocator := context.allocator) -> (plan: Plan) {
     for &buffer in plan.buffers {
         for &part in buffer do part = make_floats(plan.half)
     }
+    plan.stages, plan.last_radix, plan.last_stride = make_stages(plan.half)
+    plan.last_shift = uint(bits.log2(uint(plan.last_stride)))
+    plan.split_re, plan.split_im = make_split_twiddles(size)
+    return
+}
 
-    stages: [dynamic]Stage
-    n, stride := plan.half, 1
+// The radix-4 stages of a complex FFT of half points but the last, and the last's radix and
+// stride. Each stage's twiddles w¹, w², w³ of each p as six arrays of n/4.
+@(private)
+make_stages :: proc(half: int) -> (stages: []Stage, last_radix, last_stride: int) {
+    list: [dynamic]Stage
+    n, stride := half, 1
     for n > 4 {
         m := n / 4
         twiddles := make_floats(6 * m)
@@ -100,21 +109,21 @@ create_plan :: proc(size: int, allocator := context.allocator) -> (plan: Plan) {
                 twiddles[(2 * k - 1) * m + p] = f32(math.sin(angle))
             }
         }
-        append(&stages, Stage{n, stride, twiddles})
+        append(&list, Stage{n, stride, twiddles})
         n /= 4
         stride *= 4
     }
-    plan.stages = stages[:]
-    plan.last_radix = n
-    plan.last_stride = stride
-    plan.last_shift = uint(bits.log2(uint(stride)))
+    return list[:], n, stride
+}
 
-    plan.split_re = make_floats(plan.half / 2 + 1)
-    plan.split_im = make_floats(plan.half / 2 + 1)
-    for k in 0 ..= plan.half / 2 {
+// ½·W_N^k for k ≤ N/4, the split's twiddles, real and imaginary parts
+@(private)
+make_split_twiddles :: proc(size: int) -> (re, im: []f32) {
+    re, im = make_floats(size / 4 + 1), make_floats(size / 4 + 1)
+    for k in 0 ..= size / 4 {
         angle := -math.TAU * f64(k) / f64(size)
-        plan.split_re[k] = f32(0.5 * math.cos(angle))
-        plan.split_im[k] = f32(0.5 * math.sin(angle))
+        re[k] = f32(0.5 * math.cos(angle))
+        im[k] = f32(0.5 * math.sin(angle))
     }
     return
 }
@@ -485,7 +494,7 @@ z_at :: proc(plan: ^Plan, x: [2][]f32, bin: int) -> complex64 #no_bounds_check {
 // The radix-4 butterfly, a 4-point DFT without twiddles
 //     X0 = (a + c) + (b + d)      X1 = (a - c) - j(b - d)
 //     X2 = (a + c) - (b + d)      X3 = (a - c) + j(b - d)
-@(private = "file")
+@(private)
 butterfly4 :: #force_inline proc "contextless" (
     a_re, a_im, b_re, b_im, c_re, c_im, d_re, d_im: F32x4,
 ) -> (
@@ -506,13 +515,13 @@ butterfly4 :: #force_inline proc "contextless" (
 // (x_re + j·x_im)(w_re + j·w_im), four at once. The minus on a multiplicand, not on the product,
 // so with fused multiply-adds it folds into a multiply-subtract (fmls) instead of costing a negate
 // of its own.
-@(private = "file")
+@(private)
 cmul :: #force_inline proc "contextless" (x_re, x_im, w_re, w_im: F32x4) -> (F32x4, F32x4) {
     return mul_add(-x_im, w_im, x_re * w_re), mul_add(x_re, w_im, x_im * w_re)
 }
 
 // a·b + c, fused where USE_FMA
-@(private = "file")
+@(private)
 mul_add :: #force_inline proc "contextless" (a, b, c: F32x4) -> F32x4 {
     when USE_FMA {
         return simd.fma(a, b, c)
@@ -541,7 +550,7 @@ store_transposed :: #force_inline proc "contextless" (dst: [^]f32, r0, r1, r2, r
 }
 
 // One lane in all four, multiplies by it become NEON's multiply by element
-@(private = "file")
+@(private)
 lane :: #force_inline proc "contextless" (v: F32x4, $LANE: int) -> F32x4 {
     return simd.swizzle(v, LANE, LANE, LANE, LANE)
 }
@@ -552,23 +561,23 @@ reverse :: #force_inline proc "contextless" (v: F32x4) -> F32x4 {
     return simd.swizzle(v, 3, 2, 1, 0)
 }
 
-@(private = "file")
+@(private)
 load :: #force_inline proc "contextless" (p: [^]f32) -> F32x4 {
     return intrinsics.unaligned_load(cast(^F32x4)p)
 }
 
-@(private = "file")
+@(private)
 store :: #force_inline proc "contextless" (p: [^]f32, v: F32x4) {
     intrinsics.unaligned_store(cast(^F32x4)p, v)
 }
 
-@(private = "file")
+@(private)
 splat :: #force_inline proc "contextless" (x: f32) -> F32x4 {
     return F32x4{x, x, x, x}
 }
 
 // 16 byte aligned, the same as a vector
-@(private = "file")
+@(private)
 make_floats :: proc(count: int) -> []f32 {
     slice, _ := runtime.make_aligned([]f32, count, 16)
     return slice

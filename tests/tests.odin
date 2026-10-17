@@ -68,6 +68,40 @@ test_run_arrays :: proc(t: ^testing.T) {
     }
 }
 
+// Four signals at once, interleaved, each lane against its own reference
+@(test)
+test_run4 :: proc(t: ^testing.T) {
+    for size := 64; size <= 65536; size *= 2 {
+        samples := make([]f32, 4 * size)
+        defer delete(samples)
+        expected: [4][]complex128
+        for &lane_expected, lane in expected {
+            lane_samples: []f32
+            lane_samples, lane_expected = signal(size, u64(lane))
+            for sample, n in lane_samples do samples[4 * n + lane] = sample
+            delete(lane_samples)
+        }
+        defer for e in expected do delete(e)
+
+        plan := fft.create_plan4(size)
+        defer fft.destroy_plan4(&plan)
+        spectrum := make([]f32, 4 * size)
+        defer delete(spectrum)
+        fft.run4(&plan, samples, spectrum)
+
+        got := make([]complex128, size / 2 + 1)
+        defer delete(got)
+        for lane in 0 ..< 4 {
+            // Bin k's real parts at 8k, imaginary parts at 8k + 4. DC and Nyquist in bin 0.
+            got[0] = complex(f64(spectrum[lane]), 0)
+            got[size / 2] = complex(f64(spectrum[4 + lane]), 0)
+            for k in 1 ..< size / 2 do got[k] = complex(f64(spectrum[8 * k + lane]), f64(spectrum[8 * k + 4 + lane]))
+            error := relative_error(got, expected[lane])
+            testing.expectf(t, error < TOLERANCE, "run4, N = %v, lane %v: %.2e of the largest bin", size, lane, error)
+        }
+    }
+}
+
 // A plan used again and again gives the same bins, its buffers carry nothing over
 @(test)
 test_repeat :: proc(t: ^testing.T) {
@@ -86,10 +120,11 @@ test_repeat :: proc(t: ^testing.T) {
     for bin, k in first do testing.expectf(t, bin == again[k], "bin %v: %v, then %v", k, bin, again[k])
 }
 
-// Noise and a few tones, and its spectrum from a plain f64 FFT: bins 0 to N/2
+// Noise and a few tones, and its spectrum from a plain f64 FFT: bins 0 to N/2. A different
+// variant gives different noise.
 @(private = "file")
-signal :: proc(size: int) -> (samples: []f32, spectrum: []complex128) {
-    generator := rand.create(u64(size))
+signal :: proc(size: int, variant: u64 = 0) -> (samples: []f32, spectrum: []complex128) {
+    generator := rand.create(u64(size) + 1000 * variant)
     context.random_generator = rand.default_random_generator(&generator)
 
     samples = make([]f32, size)
