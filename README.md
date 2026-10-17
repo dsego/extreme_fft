@@ -2,7 +2,7 @@
 
 A forward FFT of real samples in [Odin](https://odin-lang.org/), one file, no dependencies. N a power of two, 128 or more. Single precision, `#simd[4]f32`: NEON on ARM, SSE on x86, SIMD128 on wasm.
 
-Written by artificial intelligence (Claude, by Anthropic) in October 2026, in [fft-fun](https://github.com/dsego/fft-fun) as `fft/fft_extreme.odin`, where `benchmark_stages/LOG.md` has each step that led to it and what it measured. The comments in [extreme_fft.odin](extreme_fft.odin) list what it does.
+Written by artificial intelligence (Claude, by Anthropic) in October 2026, starting from the AI FFT in [fft-fun](https://github.com/dsego/fft-fun). [LOG.md](LOG.md) has each step and what it measured, the ones that didn't work too. The comments in [extreme_fft.odin](extreme_fft.odin) list what it does.
 
 
 #### Use
@@ -80,4 +80,4 @@ Against Apple's vDSP on macOS, which takes the samples split into even and odd o
 
 One transform as four is about level with vDSP, ahead at 512, 2048 and 32768, 1–13% behind between. Four at once is faster than vDSP up to 2048. From 4096 its buffers, four transforms' worth, are larger than the M1's 128 KB data cache, and from 16384 a single transform's are too. strobe-tuner's own pffft build is 1–19% slower than `run` from 4096 to 65536.
 
-Tried and slower: splitting a transform into rows and columns that each fit the data cache (four step), the twiddles in tangent form, radix-8. fft-fun's `benchmark_stages/LOG.md` has the earlier ones.
+Tried and slower: splitting a transform into rows and columns that each fit the data cache (four step), the twiddles in tangent form, radix-8. [LOG.md](LOG.md) has them all.

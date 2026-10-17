@@ -11,8 +11,8 @@ import "core:simd"
     ============================================================================================
     WRITTEN BY ARTIFICIAL INTELLIGENCE: this file was written by Claude, an AI model made by
     Anthropic, in October 2026, as fft/fft_extreme.odin in github.com/dsego/fft-fun and moved
-    here as a package of its own. fft-fun's benchmark_stages/LOG.md has every step that led to
-    it and what each one measured.
+    here as a package of its own. LOG.md has every step that led to it and what each one
+    measured.
 
     A forward FFT of real samples, N a power of two, 128 or more:
 
@@ -34,7 +34,7 @@ import "core:simd"
          Fused multiply-adds where the target has them, see USE_FMA.
 
     On an Apple M1 Pro it is a little faster than pffft's ordered transform and a few percent
-    slower than Apple's vDSP. Every pass is bound by the vector units, see LOG.md in fft-fun.
+    slower than Apple's vDSP. Every pass is bound by the vector units, see LOG.md.
 
     run lays the N/2 bins out like pffft_transform_ordered, complex, bin 0 packing the two real
     ones as (DC, Nyquist). run_arrays puts them in a real and an imaginary array like vDSP, DC in

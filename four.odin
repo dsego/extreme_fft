@@ -11,7 +11,7 @@ import "core:math/bits"
     Four FFTs at once, one in each SIMD lane. A twiddle is the same for all four, so every pass is
     plain vector arithmetic on whole vectors: no even and odd split of the samples, no
     transposes, no turning lanes around in the split. Those are what keeps a single transform
-    from going faster, see the passes' timings in fft-fun's benchmark_stages/LOG.md.
+    from going faster, see the passes' timings in LOG.md.
 
     The four signals interleaved, sample n of signal t at samples[4n + t], the way four channel
     audio comes. A complex point of the half size FFT, z[k] = x[2k] + j·x[2k+1], is then the 8
