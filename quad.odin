@@ -93,6 +93,24 @@ run_quad_arrays :: proc(plan: ^Quad_Plan, samples: []f32, re, im: []f32) {
     the single k = L/2 apart, where the sub-spectra's packed DC and Nyquist come in and the
     full spectrum's go out. With ARRAYS the bins go to out (real parts) and out_im, without into
     out interleaved.
+
+    Bins k to k+3 of sub_bins, the lanes the sub-signals l, as run_lanes leaves them:
+
+          bin k    | X0[k]   X1[k]   X2[k]   X3[k]   |
+          bin k+1  | X0[k+1] X1[k+1] X2[k+1] X3[k+1] |
+          bin k+2  | X0[k+2] X1[k+2] X2[k+2] X3[k+2] |
+          bin k+3  | X0[k+3] X1[k+3] X2[k+3] X3[k+3] |
+
+    transposed, so the lanes are k to k+3 and each row is one sub-signal, under its twiddles:
+
+          a        | X0[k]   X0[k+1] X0[k+2] X0[k+3] |
+          b        | X1[k]   X1[k+1] X1[k+2] X1[k+3] |  · W_N^k, each lane's k
+          c        | X2[k]   X2[k+1] X2[k+2] X2[k+3] |  · W_N^2k
+          d        | X3[k]   X3[k+1] X3[k+2] X3[k+3] |  · W_N^3k
+
+    and butterfly4(a, b, c, d) down the columns gives, lane by lane, D0 = X[k], D1 = X[k + L],
+    conj(D3) = X[L - k] and conj(D2) = X[2L - k]: four vectors of bins, the last two stored
+    backwards.
 */
 @(private = "file")
 combine :: proc(plan: ^Quad_Plan, out, out_im: [^]f32, $ARRAYS: bool) #no_bounds_check {

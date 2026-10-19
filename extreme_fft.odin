@@ -101,8 +101,25 @@ create_plan :: proc(size: int, allocator := context.allocator) -> (plan: Plan) {
     return
 }
 
-// The radix-4 stages of a complex FFT of half points but the last, and the last's radix and
-// stride. Each stage's twiddles w¹, w², w³ of each p as six arrays of m.
+/*
+    The radix-4 stages of a complex FFT of half points but the last, and the last's radix and
+    stride. Each stage's twiddles w¹, w², w³ of each p as six arrays of m, w = W_n^p with n the
+    stage's sub-transform length 4m:
+
+        | w¹ re, m of them | w¹ im | w² re | w² im | w³ re | w³ im |
+
+    Each stage takes a quarter off n and puts it on the stride, 4·m·stride = N/2 throughout, and
+    what is left of n at 4 or 2 is the last stage's radix:
+
+        N = 1024, N/2 = 512 points        n      m   stride
+          stages[0], first_stage        512    128        1
+          stages[1], radix4_stage       128     32        4
+          stages[2]                      32      8       16
+          stages[3]                       8      2       64
+          the last, in the split          2             256    radix 2, s = N/4
+
+    N = 2048 goes 1024, 256, 64, 16 and leaves 4: a radix-4 last stage, s = N/8 = 256.
+*/
 @(private)
 make_stages :: proc(half: int) -> (stages: []Stage, last_radix, last_stride: int) {
     count := 0
@@ -193,9 +210,23 @@ run_stages :: proc(plan: ^Plan, samples: []f32) -> (current: int) {
     run_arrays are the way in otherwise.
 */
 
-// The first stage, stride 1, four values of p at once. The input is the samples, each pair a
-// complex point, and the four outputs of each butterfly land next to each other, so the four
-// butterflies' outputs are transposed on the way out.
+/*
+    The first stage, stride 1 and m = N/8, four values of p at once: with s = 1 there is only
+    q = 0, so the lanes are p to p+3. The input is the samples, each pair a complex point, split
+    into real and imaginary parts as they're loaded (ld2):
+
+        samples  | re im | re im | re im | re im | ...     points p to p+3 → a, and from p + m,
+                  point p    p+1     p+2     p+3           p + 2m, p + 3m → b, c, d
+
+    Butterfly p's four outputs are points 4p to 4p+3, next to each other, so the lanes' outputs
+    are a 4×4 that is transposed on the way out (st4):
+
+                 lane 0  lane 1  lane 2  lane 3
+          y0  |   4p     4p+4    4p+8    4p+12  |              out[4p ..]     y0 y1 y2 y3 of lane 0
+          y1  |   4p+1   4p+5    4p+9    4p+13  |     st4      out[4p+4 ..]   y0 y1 y2 y3 of lane 1
+          y2  |   4p+2   4p+6    4p+10   4p+14  |   ------->   out[4p+8 ..]   y0 y1 y2 y3 of lane 2
+          y3  |   4p+3   4p+7    4p+11   4p+15  |              out[4p+12 ..]  y0 y1 y2 y3 of lane 3
+*/
 first_stage :: proc(stage: Stage, samples: [^]f32, dst: [2][]f32) #no_bounds_check {
     m := stage.m
     tw := raw_data(stage.twiddles)
@@ -217,8 +248,24 @@ first_stage :: proc(stage: Stage, samples: [^]f32, dst: [2][]f32) #no_bounds_che
     }
 }
 
-// A radix-4 stage with a stride of 4 or more, four values of q at once under one twiddle. The
-// twiddles of p = 0 are all 1, its butterflies skip the multiplies.
+/*
+    A radix-4 stage with a stride of 4 or more, N/2 = 4·m·s points in and out. The butterfly
+    (p, q), p < m and q < s, takes one point from each quarter of the input and leaves its four
+    outputs s apart in block p of the output, 4s long:
+
+        in   |     quarter 0     |     quarter 1     |     quarter 2     |     quarter 3     |
+             |  a at s·p + q     |  b, + N/8         |  c, + 2·N/8       |  d, + 3·N/8       |
+
+                 y0, y1, y2, y3 = butterfly4(a, b, c, d), then y1·w¹, y2·w², y3·w³, w = W_4m^p
+
+        out  | block 0 | block 1 |  ...  |          block p, from 4·s·p           |  ...  |
+                                         | y0 at q | y1 at q | y2 at q | y3 at q |
+                                         |   + 0   |   + s   |  + 2s   |  + 3s   |
+
+    Four values of q at once under one twiddle: q to q+3 are neighbours on both sides, a plain
+    vector load or store each and nothing to shuffle. The twiddles of p = 0 are all 1, its
+    butterflies skip the multiplies.
+*/
 radix4_stage :: proc(stage: Stage, src, dst: [2][]f32) #no_bounds_check {
     m := stage.m
     s := stage.stride
@@ -327,8 +374,19 @@ radix4_lane :: #force_inline proc "contextless" (
     stage's butterfly at q, s its stride.
 */
 
-// The split with a radix-2 last stage, s = N/4: Z[q] = x[q] + x[q+s], Z[q+s] = x[q] - x[q+s].
-// With ARRAYS the bins go to out (real parts) and out_im, without into out interleaved.
+/*
+    The split with a radix-2 last stage, s = N/4: Z[q] = x[q] + x[q+s] and Z[q+s] = x[q] - x[q+s],
+    two rows of s. Bin k pairs with N/2 - k = s + (s - k): the lanes k to k+3 of row 0 with s-k
+    down to s-k-3 of row 1, backwards.
+
+        row 0  | Z[0]  Z[1] .. Z[4]  Z[5] .. Z[8]   . . .   Z[s-3] Z[s-2] Z[s-1] |   bins 0 to s-1
+        row 1  | Z[s]   . . .   Z[2s-8] .. Z[2s-5]  Z[2s-4] .. Z[2s-1]           |   bins s to 2s-1
+
+    1 to 4 pair with 2s-1 down to 2s-4, 5 to 8 with 2s-5 down to 2s-8, and so on until the blocks
+    meet at Z[s], bin N/4, its own mirror and row 1's first point: the last block, k = s-3, is
+    Z[s-3], Z[s-2], Z[s-1] and Z[s]. With ARRAYS the bins go to out (real parts) and out_im,
+    without into out interleaved.
+*/
 @(private = "file")
 radix2_split :: proc(plan: ^Plan, x: [2][]f32, out, out_im: [^]f32, $ARRAYS: bool) #no_bounds_check {
     s := plan.last_stride
@@ -367,10 +425,27 @@ radix2_split :: proc(plan: ^Plan, x: [2][]f32, out, out_im: [^]f32, $ARRAYS: boo
     }
 }
 
-// The split with a radix-4 last stage, s = N/8. Z[q + j·s] is output j of the butterfly at q.
-// The butterfly at q and the one at its mirror r = s - q - 3 together hold both bins of four
-// pairs: k = q + j·s pairs with N/2 - k = (s - q) + (3 - j)·s, in the mirror's lanes backwards.
-// From q = 1 the blocks tile bins 1 to N/2 - 1 but for the butterfly at q = 0.
+/*
+    The split with a radix-4 last stage, s = N/8. Z[q + j·s] is output j of the butterfly at q,
+    so Z is four rows of s, row j the j-th outputs of the butterflies at q = 0 to s-1:
+
+                 q = 0   q .. q+3                   r .. r+3      s-1
+        row 0  |  Z[0]   [ ][ ][ ][ ]   . . . . .   [ ][ ][ ][ ]   .  |   bins 0 to s-1
+        row 1  |  Z[s]   [ ][ ][ ][ ]   . . . . .   [ ][ ][ ][ ]   .  |   bins s to 2s-1
+        row 2  |  Z[2s]  [ ][ ][ ][ ]   . . . . .   [ ][ ][ ][ ]   .  |   bins 2s to 3s-1
+        row 3  |  Z[3s]  [ ][ ][ ][ ]   . . . . .   [ ][ ][ ][ ]   .  |   bins 3s to 4s-1
+
+    Bin k = q + j·s pairs with N/2 - k = (s - q) + (3 - j)·s: the lanes q to q+3 of row j with
+    r+3 down to r of row 3 - j, r = s - q - 3, the mirror's lanes backwards. So the butterflies
+    at q and at r between them hold both bins of four vectors of pairs:
+
+        row 0 at q  ↔  row 3 at r        row 0 at r  ↔  row 3 at q
+        row 1 at q  ↔  row 2 at r        row 1 at r  ↔  row 2 at q
+
+    q runs up from 1 and r down from s - 4 until they meet at s/2, the one point both take in.
+    The butterfly at q = 0 is done apart: Z[0] is bin 0, Z[s] pairs with Z[3s] and Z[2s] is its
+    own mirror.
+*/
 @(private = "file")
 radix4_split :: proc(plan: ^Plan, x: [2][]f32, out, out_im: [^]f32, $ARRAYS: bool) #no_bounds_check {
     s := plan.last_stride

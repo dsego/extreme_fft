@@ -15,10 +15,16 @@ import "core:math/bits"
 
     The four signals interleaved, sample n of signal t at samples[4n + t], the way four channel
     audio comes. A complex point of the half size FFT, z[k] = x[2k] + j·x[2k+1], is then the 8
-    floats from 8k: the four real parts and the four imaginary parts. The work buffers and the
-    bins keep that layout, bin k of the four signals at spectrum[8k] (real parts) and
-    spectrum[8k + 4] (imaginary parts). Bin 0 holds DC in the real parts and Nyquist in the
-    imaginary parts.
+    floats from 8k: the four real parts and the four imaginary parts, a vector each, signal t in
+    lane t, and the samples are already in that layout:
+
+        samples  | x0[0] x1[0] x2[0] x3[0] | x0[1] x1[1] x2[1] x3[1] | x0[2] x1[2] x2[2] x3[2] | ...
+        points   |  re    re    re    re   |  im    im    im    im   |  re    re    re    re   | ...
+                 |             point 0, 8 floats from 0              |      point 1, from 8
+
+    The work buffers and the bins keep that layout, bin k of the four signals at spectrum[8k]
+    (real parts) and spectrum[8k + 4] (imaginary parts). Bin 0 holds DC in the real parts and
+    Nyquist in the imaginary parts.
 
     Otherwise as in extreme_fft.odin: radix-4 Stockham stages, the last one inside the split,
     bin k and bin N/2 - k together. Forward only and not scaled, N a power of two, 64 or more.
