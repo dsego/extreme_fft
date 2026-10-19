@@ -43,11 +43,7 @@ fft.run_quad_arrays(&plan, samples, re, im)  // like run_arrays
 
 #### Fused multiply-adds
 
-Used on ARM64. On x86 they need FMA3, and without it LLVM calls the C library's `fmaf` for each lane, so they're off there unless asked for:
-
-```
-odin build . -define:EXTREME_FFT_FMA=true -microarch:native
-```
+Used where the target has them: on ARM64, and on x86 built for a target with FMA3, `-microarch:native` on a Haswell or later or `-microarch:haswell` say. Without FMA3 LLVM calls the C library's `fmaf` for each lane, so a plain x86 build does a multiply and an add instead. `-define:EXTREME_FFT_FMA=true` or `false` overrides either way.
 
 
 #### Tests
@@ -70,15 +66,15 @@ Against Apple's vDSP on macOS, which takes the samples split into even and odd o
 
 | N | `run` | `run_arrays` | `run_quad` | `run_quad_arrays` | `run_lanes`, a transform | vDSP FFT | vDSP DFT | vDSP FFT, 4 at once |
 |---|---|---|---|---|---|---|---|---|
-| 512 | 0.385 | 0.338 | 0.221 | 0.218 | 0.174 | 0.244 | 0.236 | 0.256 |
-| 1024 | 0.552 | 0.545 | 0.527 | 0.523 | 0.442 | 0.506 | 0.499 | 0.517 |
-| 2048 | 1.231 | 1.199 | 1.011 | 0.992 | 0.910 | 1.116 | 1.119 | 1.119 |
-| 4096 | 2.457 | 2.430 | 2.400 | 2.362 | 2.364 | 2.360 | 2.345 | 2.464 |
-| 8192 | 5.680 | 5.443 | 5.106 | 5.108 | 5.393 | 4.957 | 5.273 | 5.659 |
-| 16384 | 13.250 | 13.565 | 12.667 | 12.629 | 13.440 | 11.251 | 12.536 | 11.991 |
-| 32768 | 35.519 | 40.204 | 27.256 | 27.944 | 25.952 | 27.988 | 31.320 | 28.060 |
+| 512 | 0.245 | 0.239 | 0.217 | 0.215 | 0.173 | 0.244 | 0.239 | 0.250 |
+| 1024 | 0.523 | 0.518 | 0.489 | 0.483 | 0.411 | 0.500 | 0.489 | 0.505 |
+| 2048 | 1.090 | 1.065 | 1.002 | 0.967 | 0.892 | 1.099 | 1.085 | 1.086 |
+| 4096 | 2.459 | 2.363 | 2.235 | 2.206 | 2.273 | 2.279 | 2.262 | 2.391 |
+| 8192 | 5.306 | 5.299 | 5.070 | 5.042 | 5.255 | 4.958 | 5.135 | 5.516 |
+| 16384 | 13.230 | 13.194 | 12.302 | 12.371 | 12.862 | 10.930 | 12.108 | 11.633 |
+| 32768 | 32.412 | 36.977 | 27.039 | 27.649 | 26.206 | 27.829 | 30.583 | 27.680 |
 
-One transform as four is about level with vDSP, ahead at 512, 2048 and 32768, 1–13% behind between. Four at once is faster than vDSP up to 2048. From 4096 its buffers, four transforms' worth, are larger than the M1's 128 KB data cache, and from 16384 a single transform's are too. strobe-tuner's own pffft build is 1–19% slower than `run` from 4096 to 65536.
+One transform as four is ahead of vDSP at every size but 8192 and 16384, where it is 2% and 13% behind. Four at once is ahead of vDSP's four at once at every size but 16384. From 4096 its buffers, four transforms' worth, are larger than the M1's 128 KB data cache, and from 16384 a single transform's are too. strobe-tuner's own pffft build is 1–19% slower than `run` from 4096 to 65536.
 
 Against the C libraries in [fft-fun](https://github.com/dsego/fft-fun), its benchmark with `run` and `run_quad` added (not in this repo). A 4096-point real FFT, microseconds, the fastest of 5 runs of 1,000 after a warm-up run, three runs of the benchmark. Same machine and Odin. FFTW is built with NEON. FFTW and Pocket FFT are double precision, the rest single. Both outputs match pffft's to 6.8e-08 of the largest bin.
 

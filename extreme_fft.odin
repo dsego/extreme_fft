@@ -25,11 +25,14 @@ import "core:simd"
          NEON on ARM, SSE on x86, SIMD128 on wasm.
       4. The first stage reads the samples in place, splitting even and odd ones as it loads
          them (ld2 on NEON), and stores its outputs transposed (st4).
-      5. The stride 4 stage takes the twiddles of four p in six vector loads and each p's out of
-         its lane, instead of six broadcast loads for every p.
+      5. On ARM64 the stride 4 stage takes the twiddles of four p in six vector loads and each
+         p's out of its lane, NEON's multiply by element, instead of six broadcast loads for
+         every p.
       6. The butterflies at p = 0, whose twiddles are 1, skip the multiplies, in their own loop.
       7. The last stage (radix-2 or radix-4, whichever log2(N/2) leaves) runs inside the split,
-         and the split does bin k and bin N/2 - k together from one load of each.
+         and the split does bin k and bin N/2 - k together from one load of each. Its blocks of
+         four start at bin 1, which leaves only bin 0 and, after a radix-4 last stage, the three
+         other bins of the butterfly at q = 0 to do one at a time.
       8. The complex multiply's minus on a multiplicand, so it folds into a multiply-subtract.
          Fused multiply-adds where the target has them, see USE_FMA.
 
@@ -46,20 +49,27 @@ import "core:simd"
 /*
     Fused multiply-adds, one rounding for a·b + c. ARM64 always has them. On x86 they need FMA3
     (Haswell and later), and LLVM calls the C library's fmaf for each lane where the target
-    doesn't have it, far slower than a multiply and an add. So by default only ARM64 uses them;
-    on x86 with FMA3 build with -define:EXTREME_FFT_FMA=true and -microarch:native or a target
-    that has it. Without fused multiply-adds the results differ from these in the last bit.
+    doesn't have it, far slower than a multiply and an add. So they're used where the target
+    has them: on ARM64, and on x86 built with -microarch:native on a machine with FMA3 or for
+    a target that has it, -microarch:haswell say. -define:EXTREME_FFT_FMA=true or false
+    overrides. Without fused multiply-adds the results differ from these in the last bit.
 */
-USE_FMA :: #config(EXTREME_FFT_FMA, ODIN_ARCH == .arm64)
+USE_FMA :: #config(EXTREME_FFT_FMA, ODIN_ARCH == .arm64 || intrinsics.has_target_feature("fma"))
 
 // Four floats in one SIMD register
 F32x4 :: #simd[4]f32
 
-// One radix-4 Stockham stage, n * stride is always N/2
+// One radix-4 Stockham stage, 4 * m * stride is always N/2
 Stage :: struct {
-    n:        int, // length of the sub-transforms at this stage
+    m:        int, // butterflies in each sub-transform, which is 4m points long
     stride:   int, // distance between neighbouring elements of a sub-transform
-    twiddles: []f32, // w¹, w², w³ of each p as six arrays of n/4: re, im, re, im, re, im
+    twiddles: []f32, // w¹, w², w³ of each p as six arrays of m: re, im, re, im, re, im
+}
+
+// The twiddles of one butterfly, w¹, w², w³, each in all four lanes
+@(private)
+Twiddles :: struct {
+    w1_re, w1_im, w2_re, w2_im, w3_re, w3_im: F32x4,
 }
 
 // A plan for one size, its tables and work buffers. Not for two threads at once, the buffers
@@ -70,7 +80,6 @@ Plan :: struct {
     stages:      []Stage, // all but the last stage
     last_radix:  int, // 2 or 4, the last stage, run inside the split
     last_stride: int, // N/2 / last_radix
-    last_shift:  uint, // log2(last_stride)
     buffers:     [2][2][]f32, // ping and pong, each the real and imaginary parts of N/2 points
     split_re:    []f32, // ½·W_N^k for k ≤ N/4, real parts. The split pairs k with N/2 - k,
     split_im:    []f32, // k never goes past N/4
@@ -88,18 +97,20 @@ create_plan :: proc(size: int, allocator := context.allocator) -> (plan: Plan) {
         for &part in buffer do part = make_floats(plan.half)
     }
     plan.stages, plan.last_radix, plan.last_stride = make_stages(plan.half)
-    plan.last_shift = uint(bits.log2(uint(plan.last_stride)))
     plan.split_re, plan.split_im = make_split_twiddles(size)
     return
 }
 
 // The radix-4 stages of a complex FFT of half points but the last, and the last's radix and
-// stride. Each stage's twiddles w¹, w², w³ of each p as six arrays of n/4.
+// stride. Each stage's twiddles w¹, w², w³ of each p as six arrays of m.
 @(private)
 make_stages :: proc(half: int) -> (stages: []Stage, last_radix, last_stride: int) {
-    list: [dynamic]Stage
+    count := 0
+    for n := half; n > 4; n /= 4 do count += 1
+    stages = make([]Stage, count)
+
     n, stride := half, 1
-    for n > 4 {
+    for &stage in stages {
         m := n / 4
         twiddles := make_floats(6 * m)
         for p in 0 ..< m {
@@ -109,11 +120,11 @@ make_stages :: proc(half: int) -> (stages: []Stage, last_radix, last_stride: int
                 twiddles[(2 * k - 1) * m + p] = f32(math.sin(angle))
             }
         }
-        append(&list, Stage{n, stride, twiddles})
+        stage = Stage{m, stride, twiddles}
         n /= 4
         stride *= 4
     }
-    return list[:], n, stride
+    return stages, n, stride
 }
 
 // ½·W_N^k for k ≤ N/4, the split's twiddles, real and imaginary parts
@@ -146,9 +157,9 @@ run :: proc(plan: ^Plan, samples: []f32, spectrum: []complex64) #no_bounds_check
     current := run_stages(plan, samples)
     out := cast([^]f32)raw_data(spectrum)
     if plan.last_radix == 2 {
-        radix2_split(plan, plan.buffers[current], out)
+        radix2_split(plan, plan.buffers[current], out, nil, false)
     } else {
-        radix4_split(plan, plan.buffers[current], out)
+        radix4_split(plan, plan.buffers[current], out, nil, false)
     }
 }
 
@@ -159,9 +170,9 @@ run_arrays :: proc(plan: ^Plan, samples: []f32, re, im: []f32) #no_bounds_check 
 
     current := run_stages(plan, samples)
     if plan.last_radix == 2 {
-        radix2_split_arrays(plan, plan.buffers[current], raw_data(re), raw_data(im))
+        radix2_split(plan, plan.buffers[current], raw_data(re), raw_data(im), true)
     } else {
-        radix4_split_arrays(plan, plan.buffers[current], raw_data(re), raw_data(im))
+        radix4_split(plan, plan.buffers[current], raw_data(re), raw_data(im), true)
     }
 }
 
@@ -178,15 +189,15 @@ run_stages :: proc(plan: ^Plan, samples: []f32) -> (current: int) {
 
 
 /*
-    The passes. Public so a benchmark can time each on its own, run and run_arrays are the way
-    in otherwise.
+    The passes. The stages are public so a benchmark can time each on its own, run and
+    run_arrays are the way in otherwise.
 */
 
 // The first stage, stride 1, four values of p at once. The input is the samples, each pair a
 // complex point, and the four outputs of each butterfly land next to each other, so the four
 // butterflies' outputs are transposed on the way out.
 first_stage :: proc(stage: Stage, samples: [^]f32, dst: [2][]f32) #no_bounds_check {
-    m := stage.n / 4
+    m := stage.m
     tw := raw_data(stage.twiddles)
     out_re, out_im := raw_data(dst[0]), raw_data(dst[1])
 
@@ -209,42 +220,45 @@ first_stage :: proc(stage: Stage, samples: [^]f32, dst: [2][]f32) #no_bounds_che
 // A radix-4 stage with a stride of 4 or more, four values of q at once under one twiddle. The
 // twiddles of p = 0 are all 1, its butterflies skip the multiplies.
 radix4_stage :: proc(stage: Stage, src, dst: [2][]f32) #no_bounds_check {
-    m := stage.n / 4
+    m := stage.m
     s := stage.stride
     quarter := s * m // the distance between a butterfly's inputs, N/8
     tw := raw_data(stage.twiddles)
     in_re, in_im := raw_data(src[0]), raw_data(src[1])
     out_re, out_im := raw_data(dst[0]), raw_data(dst[1])
 
-    if s == 4 {
-        // One block of q for each p: four p at a time, their twiddles six vector loads from the
-        // table and each p's taken out of its lane, instead of six broadcast loads for every p.
-        // p = 0's twiddles in the table are 1.
-        for p := 0; p < m; p += 4 {
-            w: [6]F32x4
-            #unroll for i in 0 ..< 6 do w[i] = load(tw[i * m + p:])
-            radix4_lane(in_re, in_im, out_re, out_im, p, quarter, w, 0)
-            radix4_lane(in_re, in_im, out_re, out_im, p, quarter, w, 1)
-            radix4_lane(in_re, in_im, out_re, out_im, p, quarter, w, 2)
-            radix4_lane(in_re, in_im, out_re, out_im, p, quarter, w, 3)
+    when ODIN_ARCH == .arm64 {
+        if s == 4 {
+            // One block of q for each p: four p at a time, their twiddles six vector loads from
+            // the table and each p's taken out of its lane, which NEON's multiply by element
+            // does for nothing, instead of six broadcast loads for every p. p = 0's twiddles in
+            // the table are 1. On x86 each lane costs a shuffle and the four lanes' body spills
+            // registers, so there the loops below, whose broadcast loads cost no vector
+            // operation, are the better bet; not measured.
+            for p := 0; p < m; p += 4 {
+                w: [6]F32x4
+                #unroll for i in 0 ..< 6 do w[i] = load(tw[i * m + p:])
+                radix4_lane(in_re, in_im, out_re, out_im, p, quarter, w, 0)
+                radix4_lane(in_re, in_im, out_re, out_im, p, quarter, w, 1)
+                radix4_lane(in_re, in_im, out_re, out_im, p, quarter, w, 2)
+                radix4_lane(in_re, in_im, out_re, out_im, p, quarter, w, 3)
+            }
+            return
         }
-        return
     }
 
     // p = 0 without multiplies, its own loop so the inner loop has no branch
     for q := 0; q < s; q += 4 {
-        radix4_block(in_re, in_im, out_re, out_im, q, q, s, quarter, false, {}, {}, {}, {}, {}, {})
+        radix4_block(in_re, in_im, out_re, out_im, q, q, s, quarter, false, {})
     }
     for p in 1 ..< m {
-        w1_re, w1_im := splat(tw[p]), splat(tw[m + p])
-        w2_re, w2_im := splat(tw[2 * m + p]), splat(tw[3 * m + p])
-        w3_re, w3_im := splat(tw[4 * m + p]), splat(tw[5 * m + p])
-
+        w := Twiddles{
+            splat(tw[p]), splat(tw[m + p]),
+            splat(tw[2 * m + p]), splat(tw[3 * m + p]),
+            splat(tw[4 * m + p]), splat(tw[5 * m + p]),
+        }
         for q := 0; q < s; q += 4 {
-            radix4_block(
-                in_re, in_im, out_re, out_im, s * p + q, 4 * s * p + q, s, quarter,
-                true, w1_re, w1_im, w2_re, w2_im, w3_re, w3_im,
-            )
+            radix4_block(in_re, in_im, out_re, out_im, s * p + q, 4 * s * p + q, s, quarter, true, w)
         }
     }
 }
@@ -256,7 +270,7 @@ radix4_block :: #force_inline proc "contextless" (
     in_re, in_im, out_re, out_im: [^]f32,
     first_in, first_out, s, quarter: int,
     $TWIDDLED: bool,
-    w1_re, w1_im, w2_re, w2_im, w3_re, w3_im: F32x4,
+    w: Twiddles,
 ) #no_bounds_check {
     y0_re, y0_im, y1_re, y1_im, y2_re, y2_im, y3_re, y3_im := butterfly4(
         load(in_re[first_in:]), load(in_im[first_in:]),
@@ -265,9 +279,9 @@ radix4_block :: #force_inline proc "contextless" (
         load(in_re[first_in + 3 * quarter:]), load(in_im[first_in + 3 * quarter:]),
     )
     when TWIDDLED {
-        y1_re, y1_im = cmul(y1_re, y1_im, w1_re, w1_im)
-        y2_re, y2_im = cmul(y2_re, y2_im, w2_re, w2_im)
-        y3_re, y3_im = cmul(y3_re, y3_im, w3_re, w3_im)
+        y1_re, y1_im = cmul(y1_re, y1_im, w.w1_re, w.w1_im)
+        y2_re, y2_im = cmul(y2_re, y2_im, w.w2_re, w.w2_im)
+        y3_re, y3_im = cmul(y3_re, y3_im, w.w3_re, w.w3_im)
     }
 
     store(out_re[first_out:], y0_re); store(out_im[first_out:], y0_im)
@@ -287,9 +301,11 @@ radix4_lane :: #force_inline proc "contextless" (
 ) {
     radix4_block(
         in_re, in_im, out_re, out_im, 4 * (p + LANE), 16 * (p + LANE), 4, quarter, true,
-        lane(w[0], LANE), lane(w[1], LANE),
-        lane(w[2], LANE), lane(w[3], LANE),
-        lane(w[4], LANE), lane(w[5], LANE),
+        Twiddles{
+            lane(w[0], LANE), lane(w[1], LANE),
+            lane(w[2], LANE), lane(w[3], LANE),
+            lane(w[4], LANE), lane(w[5], LANE),
+        },
     )
 }
 
@@ -311,28 +327,10 @@ radix4_lane :: #force_inline proc "contextless" (
     stage's butterfly at q, s its stride.
 */
 
-// The split with a radix-2 last stage, into interleaved bins and into two arrays
-radix2_split :: proc(plan: ^Plan, x: [2][]f32, out: [^]f32) {
-    radix2_split_into(plan, x, out, nil, false)
-}
-
-radix2_split_arrays :: proc(plan: ^Plan, x: [2][]f32, re, im: [^]f32) {
-    radix2_split_into(plan, x, re, im, true)
-}
-
-// The split with a radix-4 last stage, into interleaved bins and into two arrays
-radix4_split :: proc(plan: ^Plan, x: [2][]f32, out: [^]f32) {
-    radix4_split_into(plan, x, out, nil, false)
-}
-
-radix4_split_arrays :: proc(plan: ^Plan, x: [2][]f32, re, im: [^]f32) {
-    radix4_split_into(plan, x, re, im, true)
-}
-
 // The split with a radix-2 last stage, s = N/4: Z[q] = x[q] + x[q+s], Z[q+s] = x[q] - x[q+s].
 // With ARRAYS the bins go to out (real parts) and out_im, without into out interleaved.
 @(private = "file")
-radix2_split_into :: proc(plan: ^Plan, x: [2][]f32, out, out_im: [^]f32, $ARRAYS: bool) #no_bounds_check {
+radix2_split :: proc(plan: ^Plan, x: [2][]f32, out, out_im: [^]f32, $ARRAYS: bool) #no_bounds_check {
     s := plan.last_stride
     half := plan.half
     x_re, x_im := raw_data(x[0]), raw_data(x[1])
@@ -340,10 +338,16 @@ radix2_split_into :: proc(plan: ^Plan, x: [2][]f32, out, out_im: [^]f32, $ARRAYS
     // plan, and it reloaded these from the plan on every iteration
     twiddle_re, twiddle_im := raw_data(plan.split_re), raw_data(plan.split_im)
 
-    for k in ([]int{0, 1, 2, 3, s}) do split_one(plan, x, out, out_im, ARRAYS, k)
+    // Bin 0 is (DC, Nyquist), out of Z[0]
+    z0_re, z0_im := x_re[0] + x_re[s], x_im[0] + x_im[s]
+    set_bin(out, out_im, 0, z0_re + z0_im, z0_re - z0_im, ARRAYS)
 
-    // Bins k to k+3 and N/2 - k down to N/2 - k - 3, which are Z[s + (s-k-l)] for lane l
-    for k := 4; k < s; k += 4 {
+    // Bins k to k+3 and N/2 - k down to N/2 - k - 3, which are Z[s + (s-k-l)] for lane l. From
+    // k = 1 the blocks and their mirrors tile bins 1 to N/2 - 1, the last block ending on bin
+    // N/4. That one is Z[s] = x[0] - x[s], not x[s] + x[2s], so the last block is done apart:
+    // Z[s] comes in from its mirror block, whose first point it is, the three before it shifted
+    // along a lane.
+    for k := 1; k < s - 3; k += 4 {
         mirror := s - k - 3
         low_re := load(x_re[k:]) + load(x_re[k + s:])
         low_im := load(x_im[k:]) + load(x_im[k + s:])
@@ -351,26 +355,48 @@ radix2_split_into :: proc(plan: ^Plan, x: [2][]f32, out, out_im: [^]f32, $ARRAYS
         high_im := reverse(load(x_im[mirror:]) - load(x_im[mirror + s:]))
         split_four(out, out_im, twiddle_re, twiddle_im, half, k, low_re, low_im, high_re, high_im, ARRAYS)
     }
+    {
+        k := s - 3
+        z_re := load(x_re[k - 1:]) + load(x_re[k - 1 + s:]) // Z[s-4] to Z[s-1]
+        z_im := load(x_im[k - 1:]) + load(x_im[k - 1 + s:])
+        high_re := load(x_re[0:]) - load(x_re[s:]) // Z[s] to Z[s+3]
+        high_im := load(x_im[0:]) - load(x_im[s:])
+        low_re := simd.shuffle(z_re, high_re, 1, 2, 3, 4) // Z[s-3], Z[s-2], Z[s-1], Z[s]
+        low_im := simd.shuffle(z_im, high_im, 1, 2, 3, 4)
+        split_four(out, out_im, twiddle_re, twiddle_im, half, k, low_re, low_im, reverse(high_re), reverse(high_im), ARRAYS)
+    }
 }
 
 // The split with a radix-4 last stage, s = N/8. Z[q + j·s] is output j of the butterfly at q.
 // The butterfly at q and the one at its mirror r = s - q - 3 together hold both bins of four
 // pairs: k = q + j·s pairs with N/2 - k = (s - q) + (3 - j)·s, in the mirror's lanes backwards.
+// From q = 1 the blocks tile bins 1 to N/2 - 1 but for the butterfly at q = 0.
 @(private = "file")
-radix4_split_into :: proc(plan: ^Plan, x: [2][]f32, out, out_im: [^]f32, $ARRAYS: bool) #no_bounds_check {
+radix4_split :: proc(plan: ^Plan, x: [2][]f32, out, out_im: [^]f32, $ARRAYS: bool) #no_bounds_check {
     s := plan.last_stride
     half := plan.half
     x_re, x_im := raw_data(x[0]), raw_data(x[1])
-    // In locals, see radix2_split_into
+    // In locals, see radix2_split
     twiddle_re, twiddle_im := raw_data(plan.split_re), raw_data(plan.split_im)
 
-    for q in ([]int{0, 1, 2, 3, s / 2, s - 3, s - 2, s - 1}) {
-        split_one(plan, x, out, out_im, ARRAYS, q)
-        split_one(plan, x, out, out_im, ARRAYS, q + s)
+    // The butterfly at q = 0: Z[0] is bin 0, (DC, Nyquist), Z[s] and Z[3s] are bins s and 3s, a
+    // pair, and Z[2s] is bin 2s, its own mirror
+    {
+        a := complex(x_re[0], x_im[0])
+        b := complex(x_re[s], x_im[s])
+        c := complex(x_re[2 * s], x_im[2 * s])
+        d := complex(x_re[3 * s], x_im[3 * s])
+        J :: complex64(1i)
+        z0 := (a + c) + (b + d)
+        z1 := (a - c) - J * (b - d)
+        z2 := (a + c) - (b + d)
+        z3 := (a - c) + J * (b - d)
+        set_bin(out, out_im, 0, real(z0) + imag(z0), real(z0) - imag(z0), ARRAYS)
+        split_pair(out, out_im, twiddle_re, twiddle_im, half, s, z1, z3, ARRAYS)
+        split_pair(out, out_im, twiddle_re, twiddle_im, half, 2 * s, z2, z2, ARRAYS)
     }
-    split_one(plan, x, out, out_im, ARRAYS, 2 * s)
 
-    for q := 4; q <= s / 2 - 4; q += 4 {
+    for q := 1; q < s / 2; q += 4 {
         r := s - q - 3
         q0_re, q0_im, q1_re, q1_im, q2_re, q2_im, q3_re, q3_im := butterfly4(
             load(x_re[q:]), load(x_im[q:]),
@@ -408,8 +434,8 @@ split_four :: #force_inline proc "contextless" (
     sum_re, diff_im := low_re + high_re, low_im - high_im
     diff_re, sum_im := low_re - high_re, low_im + high_im
     odd_im := mul_add(diff_re, w_im, sum_im * w_re)
-    // -odd_re directly, the minus on a multiplicand like in cmul, both bins' imaginary parts are
-    // ±½·diff_im minus odd_re, two multiply-adds and no negate
+    // -odd_re directly, the minus on a multiplicand like in cmul: bin k's imaginary part is
+    // ½·diff_im minus odd_re, a multiply-add and no negate
     minus_odd_re := mul_add(-diff_re, w_re, sum_im * w_im)
     even_re := HALF * sum_re
 
@@ -417,9 +443,11 @@ split_four :: #force_inline proc "contextless" (
     x_re := even_re + odd_im
     x_im := mul_add(HALF, diff_im, minus_odd_re)
 
-    // X[N/2 - k] = conj(E - T), descending from N/2 - k in the lanes
+    // X[N/2 - k] = conj(E - T), descending from N/2 - k in the lanes. Its imaginary part,
+    // -½·diff_im minus odd_re, is x_im less diff_im: a subtract, where a second multiply-add
+    // into minus_odd_re cost a copy of it first, NEON's overwrites its accumulator.
     m_re := even_re - odd_im
-    m_im := mul_add(-HALF, diff_im, minus_odd_re)
+    m_im := x_im - diff_im
     mirror := half - k - 3
 
     when ARRAYS {
@@ -437,56 +465,29 @@ split_four :: #force_inline proc "contextless" (
     }
 }
 
-// Bin k and bin N/2 - k one at a time, for the bins the vector loops don't reach. Bin 0 is
-// (DC, Nyquist), both real. With arrays into out and out_im, without into out interleaved.
+// Bin k and bin N/2 - k one at a time, out of Z[k] (low) and Z[N/2 - k] (high), for the bins the
+// vector loops don't reach
 @(private = "file")
-split_one :: proc(plan: ^Plan, x: [2][]f32, out, out_im: [^]f32, arrays: bool, k: int) #no_bounds_check {
-    // Bin b's real and imaginary parts
-    bin_at := proc(out, out_im: [^]f32, arrays: bool, b: int) -> (^f32, ^f32) {
-        if arrays do return &out[b], &out_im[b]
-        return &out[2 * b], &out[2 * b + 1]
-    }
-
-    if k == 0 {
-        z := z_at(plan, x, 0)
-        dc, nyquist := bin_at(out, out_im, arrays, 0)
-        dc^ = real(z) + imag(z)
-        nyquist^ = real(z) - imag(z)
-        return
-    }
-
-    low := z_at(plan, x, k)
-    high := z_at(plan, x, plan.half - k)
-    twiddle := complex(plan.split_re[k], plan.split_im[k])
-
+split_pair :: #force_inline proc "contextless" (
+    out, out_im, twiddle_re, twiddle_im: [^]f32,
+    half, k: int,
+    low, high: complex64,
+    $ARRAYS: bool,
+) #no_bounds_check {
+    twiddle := complex(twiddle_re[k], twiddle_im[k])
     even := complex(0.5 * (real(low) + real(high)), 0.5 * (imag(low) - imag(high)))
     odd := twiddle * complex(real(low) - real(high), imag(low) + imag(high))
-
-    low_re, low_im := bin_at(out, out_im, arrays, k)
-    low_re^ = real(even) + imag(odd)
-    low_im^ = imag(even) - real(odd)
-    high_re, high_im := bin_at(out, out_im, arrays, plan.half - k)
-    high_re^ = real(even) - imag(odd)
-    high_im^ = -imag(even) - real(odd)
+    set_bin(out, out_im, k, real(even) + imag(odd), imag(even) - real(odd), ARRAYS)
+    set_bin(out, out_im, half - k, real(even) - imag(odd), -imag(even) - real(odd), ARRAYS)
 }
 
-// One point of Z, output j of the last stage's butterfly at q, for bin = q + j·s
-@(private = "file")
-z_at :: proc(plan: ^Plan, x: [2][]f32, bin: int) -> complex64 #no_bounds_check {
-    s := plan.last_stride
-    q, j := bin & (s - 1), bin >> plan.last_shift // s a power of two, no division
-    a := complex(x[0][q], x[1][q])
-    b := complex(x[0][q + s], x[1][q + s])
-    if plan.last_radix == 2 do return a + b if j == 0 else a - b
-
-    c := complex(x[0][q + 2 * s], x[1][q + 2 * s])
-    d := complex(x[0][q + 3 * s], x[1][q + 3 * s])
-    J :: complex64(1i)
-    switch j {
-    case 0: return (a + c) + (b + d)
-    case 1: return (a - c) - J * (b - d)
-    case 2: return (a + c) - (b + d)
-    case:   return (a - c) + J * (b - d)
+// Bin k's real and imaginary parts: with ARRAYS into out and out_im, without into out interleaved
+@(private)
+set_bin :: #force_inline proc "contextless" (out, out_im: [^]f32, k: int, re, im: f32, $ARRAYS: bool) #no_bounds_check {
+    when ARRAYS {
+        out[k], out_im[k] = re, im
+    } else {
+        out[2 * k], out[2 * k + 1] = re, im
     }
 }
 

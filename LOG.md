@@ -290,3 +290,31 @@ The small FFTs in the data cache take as long as `run4`'s passes through the nex
 | 32768 | 35.519 | 27.256 | 27.944 | 27.988 | 31.320 |
 
 Faster than `run` at every size, about level with vDSP. The combining pass costs about two ordinary passes, 0.6 µs at 4096: for 16 bins a transpose of the real and the imaginary parts, 16 shuffles, three twiddle multiplies, the butterfly and two lane reversals, about 54 vector operations. The single transform's `ld2`, `st4` and reversals were the same kind of cost, mixing the four lanes takes one transpose's worth wherever it is done.
+
+
+#### Review
+
+The whole read through once more, the generated code loop by loop (`-build-mode:asm`, ARM64 and x86). The stage loops were as tight as they get: `ld2` and `st4` in the first pass, `fmla` and `fmls` by element in the stride 4 pass, no spills, no register copies, 52 and 48 instructions an iteration as before. What changed:
+
+* The split's vector blocks start at bin 1 instead of 4. Blocks k to k+3 and their mirrors N/2 − k down to N/2 − k − 3 then tile bins 1 to N/2 − 1 by themselves, and the only bins left to do one at a time are bin 0 and, after a radix-4 last stage, bins s, 2s and 3s, the butterfly at q = 0 (bin s pairs with 3s, bin 2s with itself). After a radix-2 last stage the last block ends on bin N/4, which is Z[s] = x[0] − x[s] rather than x[s] + x[2s], so that block is done apart: Z[s] comes in from its mirror block with one `ext`. `split_one` and `z_at` are gone, and with them 17 calls and the 33 inside them after a radix-4 last stage, 5 and 9 after radix-2, and `last_shift`.
+* The four lane split's radix-2 loop tested `k < s` and `k == s` inside the loop, compiled to zeroing, a compare and two bit-selects an iteration, and read `plan.half` inside the loop, reloaded every iteration like the single transform's split used to. Bin N/4 out of the loop, `half` in a local: 38 instructions an iteration from about 50. The radix-4 loop's `q == r` iteration peeled the same way.
+* The mirrored bin's imaginary part as `x_im − diff_im` instead of a second multiply-add into `minus_odd_re`: NEON's `fmla` overwrites its accumulator, so the second one cost a `mov` of it first. One vector operation of about forty in each split block, the same in `split_pair4`.
+* A butterfly's six twiddle vectors passed as one struct, `radix4_block` down to 10 parameters from 15 and no `{}, {}, {}, {}, {}, {}` for p = 0. The middle passes unchanged, see 4096 below.
+* Fused multiply-adds on wherever the target has them, `intrinsics.has_target_feature("fma")` in USE_FMA's default, so `-microarch:native` or `-microarch:haswell` on x86 gets them without the define. Checked: on for arm64 and haswell, off for x86-64-v2, the define still overrides.
+* The stride 4 pass's twiddles by lane are ARM64 only. On x86 a lane is a shuffle, `vbroadcastss xmm, xmm`, where the plain loop's broadcast loads are load-port work only, and the four lane body spilled: 244 vector instructions and 44 stack moves an iteration at Haswell, against 70 and none in the first pass. Not measured, no x86 here.
+* `Stage` holds m, the butterflies in a sub-transform, instead of n; the stage count is known before the stages are made, instead of a dynamic array freed as a slice; `combine`'s eighth roots of unity are constants instead of cos and sin calls that LLVM folded anyway (and f32(cos(−π/2)) is 6e−17, not 0).
+* `test_repeat` runs every way of computing a transform, not `run` alone.
+
+Before and after, the same session, one run of the benchmark before and two after, the after as a range. The vDSP columns moved by up to 2% between the runs, except its batch of four at 4096: 2.38, then 2.63, then 2.39.
+
+| N | `run` before | after | `run_arrays` before | after | `run_quad` before | after | `run_lanes` before | after |
+|---|---|---|---|---|---|---|---|---|
+| 512 | 0.389 | 0.245–0.278 | 0.335 | 0.239–0.259 | 0.220 | 0.217 | 0.172 | 0.173 |
+| 1024 | 0.540 | 0.523–0.530 | 0.529 | 0.515–0.518 | 0.517 | 0.489–0.498 | 0.434 | 0.411 |
+| 2048 | 1.198 | 1.090–1.105 | 1.169 | 1.065–1.074 | 0.989 | 0.998–1.002 | 0.888 | 0.892–0.904 |
+| 4096 | 2.442 | 2.432–2.459 | 2.372 | 2.363–2.378 | 2.363 | 2.235–2.271 | 2.296 | 2.273–2.291 |
+| 8192 | 5.358 | 5.293–5.306 | 5.324 | 5.248–5.299 | 5.072 | 5.070–5.236 | 5.223 | 5.255–5.293 |
+| 16384 | 12.957 | 13.208–13.230 | 13.423 | 13.194–13.310 | 12.137 | 12.222–12.302 | 13.017 | 12.791–12.862 |
+| 32768 | 32.710 | 32.162–32.412 | 37.754 | 35.696–36.977 | 26.610 | 26.714–27.039 | 25.259 | 25.400–26.206 |
+
+The edge bins were a fixed cost, so the gain is at the small sizes with a radix-4 last stage, which had 17 of them: `run` 29–37% faster at 512 and 8–9% at 2048, `run_arrays` 23–29% and 8–9%. The sizes with a radix-2 last stage had 5: 2–3% at 1024. From 8192 on the memory bound passes decide and nothing moved past the run to run 2–3%. The largest error over the tests' signals is 3.5e−7 of the largest bin as before, 4.0e−7 without fused multiply-adds.

@@ -81,7 +81,7 @@ run_lanes :: proc(plan: ^Lanes_Plan, samples: []f32, spectrum: []f32) #no_bounds
 // loads from the table and each p's taken out of its lane, the inner loop over q is one point
 // long at stride 1.
 first_stage4 :: proc(stage: Stage, samples, dst: [^]f32) #no_bounds_check {
-    m := stage.n / 4
+    m := stage.m
     tw := raw_data(stage.twiddles)
     for p := 0; p < m; p += 4 {
         w: [6]F32x4
@@ -98,26 +98,28 @@ first_lane4 :: #force_inline proc "contextless" (samples, dst: [^]f32, p, m: int
     i := p + LANE
     radix4_point4(
         samples, dst, i, m, 4 * i, 1, true,
-        lane(w[0], LANE), lane(w[1], LANE), lane(w[2], LANE),
-        lane(w[3], LANE), lane(w[4], LANE), lane(w[5], LANE),
+        Twiddles{
+            lane(w[0], LANE), lane(w[1], LANE), lane(w[2], LANE),
+            lane(w[3], LANE), lane(w[4], LANE), lane(w[5], LANE),
+        },
     )
 }
 
 // A radix-4 stage with a stride of 4 or more, one point per q under the twiddles of p
 radix4_stage4 :: proc(stage: Stage, src, dst: [^]f32) #no_bounds_check {
-    m := stage.n / 4
+    m := stage.m
     s := stage.stride
     quarter := s * m
     tw := raw_data(stage.twiddles)
 
-    for q in 0 ..< s do radix4_point4(src, dst, q, quarter, q, s, false, {}, {}, {}, {}, {}, {})
+    for q in 0 ..< s do radix4_point4(src, dst, q, quarter, q, s, false, {})
     for p in 1 ..< m {
-        w1_re, w1_im := splat(tw[p]), splat(tw[m + p])
-        w2_re, w2_im := splat(tw[2 * m + p]), splat(tw[3 * m + p])
-        w3_re, w3_im := splat(tw[4 * m + p]), splat(tw[5 * m + p])
-        for q in 0 ..< s {
-            radix4_point4(src, dst, s * p + q, quarter, 4 * s * p + q, s, true, w1_re, w1_im, w2_re, w2_im, w3_re, w3_im)
+        w := Twiddles{
+            splat(tw[p]), splat(tw[m + p]),
+            splat(tw[2 * m + p]), splat(tw[3 * m + p]),
+            splat(tw[4 * m + p]), splat(tw[5 * m + p]),
         }
+        for q in 0 ..< s do radix4_point4(src, dst, s * p + q, quarter, 4 * s * p + q, s, true, w)
     }
 }
 
@@ -128,7 +130,7 @@ radix4_point4 :: #force_inline proc "contextless" (
     src, dst: [^]f32,
     first_in, quarter, first_out, s: int,
     $TWIDDLED: bool,
-    w1_re, w1_im, w2_re, w2_im, w3_re, w3_im: F32x4,
+    w: Twiddles,
 ) #no_bounds_check {
     a_re, a_im := point(src, first_in)
     b_re, b_im := point(src, first_in + quarter)
@@ -136,9 +138,9 @@ radix4_point4 :: #force_inline proc "contextless" (
     d_re, d_im := point(src, first_in + 3 * quarter)
     y0_re, y0_im, y1_re, y1_im, y2_re, y2_im, y3_re, y3_im := butterfly4(a_re, a_im, b_re, b_im, c_re, c_im, d_re, d_im)
     when TWIDDLED {
-        y1_re, y1_im = cmul(y1_re, y1_im, w1_re, w1_im)
-        y2_re, y2_im = cmul(y2_re, y2_im, w2_re, w2_im)
-        y3_re, y3_im = cmul(y3_re, y3_im, w3_re, w3_im)
+        y1_re, y1_im = cmul(y1_re, y1_im, w.w1_re, w.w1_im)
+        y2_re, y2_im = cmul(y2_re, y2_im, w.w2_re, w.w2_im)
+        y3_re, y3_im = cmul(y3_re, y3_im, w.w3_re, w.w3_im)
     }
     set_point(dst, first_out, y0_re, y0_im)
     set_point(dst, first_out + s, y1_re, y1_im)
@@ -155,28 +157,24 @@ radix4_point4 :: #force_inline proc "contextless" (
 // The split with a radix-2 last stage, s = N/4: Z[q] = x[q] + x[q+s], Z[q+s] = x[q] - x[q+s]
 radix2_split4 :: proc(plan: ^Lanes_Plan, x, out: [^]f32) #no_bounds_check {
     s := plan.last_stride
+    half := plan.half // in a local like the twiddles, see radix2_split
     twiddle_re, twiddle_im := raw_data(plan.split_re), raw_data(plan.split_im)
 
-    // DC and Nyquist out of Z[0]
+    // DC and Nyquist out of Z[0], and bin N/4, its own mirror, out of Z[s] = x[0] - x[s]
     a_re, a_im := point(x, 0)
     b_re, b_im := point(x, s)
     z_re, z_im := a_re + b_re, a_im + b_im
     set_point(out, 0, z_re + z_im, z_re - z_im)
+    z_re, z_im = a_re - b_re, a_im - b_im
+    split_pair4(out, twiddle_re, twiddle_im, half, s, z_re, z_im, z_re, z_im)
 
-    for k in 1 ..= s {
-        // Z[k] for k < s, Z[s] = x[0] - x[s], and Z[N/2 - k] = Z[s + (s - k)]
-        low_re, low_im: F32x4
-        if k < s {
-            l_re, l_im := point(x, k)
-            h_re, h_im := point(x, k + s)
-            low_re, low_im = l_re + h_re, l_im + h_im
-        }
-        m := s - k
-        p_re, p_im := point(x, m)
-        q_re, q_im := point(x, m + s)
-        high_re, high_im := p_re - q_re, p_im - q_im
-        if k == s do low_re, low_im = high_re, high_im
-        split_pair4(out, twiddle_re, twiddle_im, plan.half, k, low_re, low_im, high_re, high_im)
+    // Z[k] = x[k] + x[k+s] and Z[N/2 - k] = Z[s + (s - k)] = x[s-k] - x[2s-k]
+    for k in 1 ..< s {
+        l_re, l_im := point(x, k)
+        h_re, h_im := point(x, k + s)
+        p_re, p_im := point(x, s - k)
+        q_re, q_im := point(x, 2 * s - k)
+        split_pair4(out, twiddle_re, twiddle_im, half, k, l_re + h_re, l_im + h_im, p_re - q_re, p_im - q_im)
     }
 }
 
@@ -197,15 +195,22 @@ radix4_split4 :: proc(plan: ^Lanes_Plan, x, out: [^]f32) #no_bounds_check {
 
     // q and its mirror s - q, the low bin of each pair always under N/4 so the twiddle is in the
     // table: q + j·s for j = 0, 1 and (s - q) + (3 - j)·s for j = 2, 3
-    for q in 1 ..= s / 2 {
+    for q in 1 ..< s / 2 {
         r := s - q
         q0_re, q0_im, q1_re, q1_im, q2_re, q2_im, q3_re, q3_im := butterfly_at4(x, q, s)
         r0_re, r0_im, r1_re, r1_im, r2_re, r2_im, r3_re, r3_im := butterfly_at4(x, r, s)
         split_pair4(out, twiddle_re, twiddle_im, half, q, q0_re, q0_im, r3_re, r3_im)
         split_pair4(out, twiddle_re, twiddle_im, half, q + s, q1_re, q1_im, r2_re, r2_im)
-        if q == r do continue
         split_pair4(out, twiddle_re, twiddle_im, half, r, r0_re, r0_im, q3_re, q3_im)
         split_pair4(out, twiddle_re, twiddle_im, half, r + s, r1_re, r1_im, q2_re, q2_im)
+    }
+
+    // q = s/2 is its own mirror: Z[s/2] pairs with Z[s/2 + 3s], Z[s/2 + s] with Z[s/2 + 2s]
+    {
+        q := s / 2
+        z0_re, z0_im, z1_re, z1_im, z2_re, z2_im, z3_re, z3_im := butterfly_at4(x, q, s)
+        split_pair4(out, twiddle_re, twiddle_im, half, q, z0_re, z0_im, z3_re, z3_im)
+        split_pair4(out, twiddle_re, twiddle_im, half, q + s, z1_re, z1_im, z2_re, z2_im)
     }
 }
 
@@ -235,8 +240,9 @@ split_pair4 :: #force_inline proc "contextless" (
     minus_odd_re := mul_add(-diff_re, w_re, sum_im * w_im)
     even_re := HALF * sum_re
 
-    set_point(out, k, even_re + odd_im, mul_add(HALF, diff_im, minus_odd_re))
-    set_point(out, half - k, even_re - odd_im, mul_add(-HALF, diff_im, minus_odd_re))
+    x_im := mul_add(HALF, diff_im, minus_odd_re)
+    set_point(out, k, even_re + odd_im, x_im)
+    set_point(out, half - k, even_re - odd_im, x_im - diff_im) // see split_four
 }
 
 // Point k of the four transforms, its real and imaginary parts

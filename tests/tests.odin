@@ -309,9 +309,9 @@ Transform :: struct {
 
 // The samples through every way the package has: run and run_arrays, run_quad and run_quad_arrays from
 // 256, and run_lanes with the samples in all four lanes, lane l times l + 1 and divided back, so a lane
-// picking up another's bins shows
+// picking up another's bins shows. Each plan run `runs` times, the bins of the last run.
 @(private = "file")
-all_transforms :: proc(samples: []f32) -> (results: [dynamic]Transform) {
+all_transforms :: proc(samples: []f32, runs := 1) -> (results: [dynamic]Transform) {
     size := len(samples)
     half := size / 2
 
@@ -340,17 +340,17 @@ all_transforms :: proc(samples: []f32) -> (results: [dynamic]Transform) {
 
     plan := fft.create_plan(size)
     defer fft.destroy_plan(&plan)
-    fft.run(&plan, samples, spectrum)
+    for _ in 0 ..< runs do fft.run(&plan, samples, spectrum)
     append(&results, Transform{"run", from_packed(spectrum)})
-    fft.run_arrays(&plan, samples, re, im)
+    for _ in 0 ..< runs do fft.run_arrays(&plan, samples, re, im)
     append(&results, Transform{"run_arrays", from_arrays(re, im)})
 
     if size >= 256 {
         quad := fft.create_quad_plan(size)
         defer fft.destroy_quad_plan(&quad)
-        fft.run_quad(&quad, samples, spectrum)
+        for _ in 0 ..< runs do fft.run_quad(&quad, samples, spectrum)
         append(&results, Transform{"run_quad", from_packed(spectrum)})
-        fft.run_quad_arrays(&quad, samples, re, im)
+        for _ in 0 ..< runs do fft.run_quad_arrays(&quad, samples, re, im)
         append(&results, Transform{"run_quad_arrays", from_arrays(re, im)})
     }
 
@@ -362,7 +362,7 @@ all_transforms :: proc(samples: []f32) -> (results: [dynamic]Transform) {
     }
     lanes_plan := fft.create_lanes_plan(size)
     defer fft.destroy_lanes_plan(&lanes_plan)
-    fft.run_lanes(&lanes_plan, interleaved, four)
+    for _ in 0 ..< runs do fft.run_lanes(&lanes_plan, interleaved, four)
     lanes := [4]string{"run_lanes lane 0", "run_lanes lane 1", "run_lanes lane 2", "run_lanes lane 3"}
     for lane in 0 ..< 4 {
         scale := f64(lane + 1)
@@ -381,22 +381,23 @@ delete_transforms :: proc(results: [dynamic]Transform) {
     delete(results)
 }
 
-// A plan used again and again gives the same bins, its buffers carry nothing over
+// A plan used again and again gives the same bins, its buffers carry nothing over: every way of
+// computing a transform, run once against run four times
 @(test)
 test_repeat :: proc(t: ^testing.T) {
-    SIZE :: 4096
-    samples, expected := signal(SIZE)
+    samples, expected := signal(4096)
     defer delete(samples)
     defer delete(expected)
-    plan := fft.create_plan(SIZE)
-    defer fft.destroy_plan(&plan)
+    once := all_transforms(samples)
+    defer delete_transforms(once)
+    again := all_transforms(samples, runs = 4)
+    defer delete_transforms(again)
 
-    first, again := make([]complex64, SIZE / 2), make([]complex64, SIZE / 2)
-    defer delete(first)
-    defer delete(again)
-    fft.run(&plan, samples, first)
-    for _ in 0 ..< 3 do fft.run(&plan, samples, again)
-    for bin, k in first do testing.expectf(t, bin == again[k], "bin %v: %v, then %v", k, bin, again[k])
+    for result, index in once {
+        for bin, k in result.bins {
+            testing.expectf(t, bin == again[index].bins[k], "%v, bin %v: %v, then %v", result.name, k, bin, again[index].bins[k])
+        }
+    }
 }
 
 // Noise and a few tones, and its spectrum from a plain f64 FFT: bins 0 to N/2. A different

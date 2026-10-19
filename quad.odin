@@ -77,7 +77,7 @@ destroy_quad_plan :: proc(plan: ^Quad_Plan, allocator := context.allocator) {
 run_quad :: proc(plan: ^Quad_Plan, samples: []f32, spectrum: []complex64) {
     assert(len(samples) == plan.size && len(spectrum) == plan.size / 2)
     run_lanes(&plan.sub, samples, plan.sub_bins)
-    out :=cast([^]f32)raw_data(spectrum)
+    out := cast([^]f32)raw_data(spectrum)
     combine(plan, out, nil, false)
 }
 
@@ -143,19 +143,21 @@ combine :: proc(plan: ^Quad_Plan, out, out_im: [^]f32, $ARRAYS: bool) #no_bounds
         for lane in 0 ..< 4 do set_bin(out, out_im, L + lane, x1_re[lane], x1_im[lane], ARRAYS)
     }
 
-    // k = L/2: X_l[L/2] is the sub-signal's Nyquist bin, real, and the twiddles are W_8^l. The
-    // four outputs are two bins, X[L/2] = D0 and X[3L/2] = D1.
+    // k = L/2: X_l[L/2] is the sub-signal's Nyquist bin, real, and the twiddles are W_8^l, that
+    // is 1, (1 - j)/√2, -j and (-1 - j)/√2. The four outputs are two bins, X[L/2] = D0 and
+    // X[3L/2] = D1 = (Y0 - Y2) - j·(Y1 - Y3).
     {
-        nyquist := simd.to_array(load(bins[4:]))
-        y_re, y_im: [4]f32
-        for l in 0 ..< 4 {
-            angle := -math.TAU * f64(l) / 8
-            y_re[l] = f32(math.cos(angle)) * nyquist[l]
-            y_im[l] = f32(math.sin(angle)) * nyquist[l]
-        }
-        set_bin(out, out_im, h, y_re[0] + y_re[1] + y_re[2] + y_re[3], y_im[0] + y_im[1] + y_im[2] + y_im[3], ARRAYS)
-        // D1 = (Y0 - Y2) - j·(Y1 - Y3)
-        set_bin(out, out_im, L + h, (y_re[0] - y_re[2]) + (y_im[1] - y_im[3]), (y_im[0] - y_im[2]) - (y_re[1] - y_re[3]), ARRAYS)
+        R :: f32(math.SQRT_TWO / 2)
+        J :: complex64(1i)
+        n := simd.to_array(load(bins[4:]))
+        y0 := complex(n[0], 0)
+        y1 := complex(R * n[1], -R * n[1])
+        y2 := complex(0, -n[2])
+        y3 := complex(-R * n[3], -R * n[3])
+        d0 := (y0 + y2) + (y1 + y3)
+        d1 := (y0 - y2) - J * (y1 - y3)
+        set_bin(out, out_im, h, real(d0), imag(d0), ARRAYS)
+        set_bin(out, out_im, L + h, real(d1), imag(d1), ARRAYS)
     }
 }
 
@@ -206,14 +208,5 @@ store_bins_mirrored :: #force_inline proc "contextless" (out, out_im: [^]f32, fi
     } else {
         store(out[2 * first:], simd.shuffle(re, im, 3, 7, 2, 6))
         store(out[2 * first + 4:], simd.shuffle(re, im, 1, 5, 0, 4))
-    }
-}
-
-@(private = "file")
-set_bin :: #force_inline proc "contextless" (out, out_im: [^]f32, k: int, re, im: f32, $ARRAYS: bool) {
-    when ARRAYS {
-        out[k], out_im[k] = re, im
-    } else {
-        out[2 * k], out[2 * k + 1] = re, im
     }
 }
