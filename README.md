@@ -80,4 +80,17 @@ Against Apple's vDSP on macOS, which takes the samples split into even and odd o
 
 One transform as four is about level with vDSP, ahead at 512, 2048 and 32768, 1–13% behind between. Four at once is faster than vDSP up to 2048. From 4096 its buffers, four transforms' worth, are larger than the M1's 128 KB data cache, and from 16384 a single transform's are too. strobe-tuner's own pffft build is 1–19% slower than `run` from 4096 to 65536.
 
+Against the C libraries in [fft-fun](https://github.com/dsego/fft-fun), its benchmark with `run` and `run_quad` added (not in this repo). A 4096-point real FFT, microseconds, the fastest of 5 runs of 1,000 after a warm-up run, three runs of the benchmark. Same machine and Odin. FFTW is built with NEON. FFTW and Pocket FFT are double precision, the rest single. Both outputs match pffft's to 6.8e-08 of the largest bin.
+
+| | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| **Extreme FFT, `run_quad`** | **2.335 µs** | **2.332 µs** | **2.332 µs** |
+| **Extreme FFT, `run`** | **2.391 µs** | **2.391 µs** | **2.398 µs** |
+| Pffft | 2.935 µs | 2.935 µs | 2.948 µs |
+| FFTW3 (NEON) | 4.493 µs | 4.493 µs | 4.520 µs |
+| Pocket FFT | 7.830 µs | 7.825 µs | 7.928 µs |
+| Meow FFT | 10.362 µs | 10.282 µs | 10.409 µs |
+| MUFFT | 10.645 µs | 10.556 µs | 10.618 µs |
+| KissFFT real | 15.050 µs | 15.009 µs | 15.032 µs |
+
 Tried and slower: splitting a transform into rows and columns that each fit the data cache (four step), the twiddles in tangent form, radix-8. [LOG.md](LOG.md) has them all.
