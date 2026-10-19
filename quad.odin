@@ -11,9 +11,10 @@ import "core:simd"
     Anthropic, in October 2026.
 
     One transform as four. A real signal read four samples at a time is four signals
-    interleaved, x_l[i] = x[4i + l] in lane l, exactly what four.odin's run4 takes. run4 needs
-    none of a single transform's reshuffles: no even and odd split, no transpose, no turning
-    lanes around. Then one pass puts the four quarter length spectra together:
+    interleaved, x_l[i] = x[4i + l] in lane l, exactly what lanes.odin's run_lanes takes.
+    run_lanes needs none of a single transform's reshuffles: no even and odd split, no
+    transpose, no turning lanes around. Then one pass puts the four quarter length spectra
+    together:
 
         X[k + j·N/4] = Σ_l W_N^(l·k) · W_4^(l·j) · X_l[k]
 
@@ -36,8 +37,8 @@ import "core:simd"
 Quad_Plan :: struct {
     size:       int, // N
     quarter:    int, // L = N/4, the length of each sub-signal
-    sub:        Plan4, // the four sub-signals' FFTs
-    sub_bins:   []f32, // their L/2 bins, 8 floats a bin, as run4 leaves them
+    sub:        Lanes_Plan, // the four sub-signals' FFTs
+    sub_bins:   []f32, // their L/2 bins, 8 floats a bin, as run_lanes leaves them
     twiddle_re: []f32, // W_N^(l·k) for l = 1, 2, 3 and k < L/2, at (l - 1)·L/2 + k
     twiddle_im: []f32,
 }
@@ -48,7 +49,7 @@ create_quad_plan :: proc(size: int, allocator := context.allocator) -> (plan: Qu
 
     plan.size = size
     plan.quarter = size / 4
-    plan.sub = create_plan4(plan.quarter)
+    plan.sub = create_lanes_plan(plan.quarter)
     plan.sub_bins = make_floats(4 * plan.quarter)
 
     half_quarter := plan.quarter / 2
@@ -66,7 +67,7 @@ create_quad_plan :: proc(size: int, allocator := context.allocator) -> (plan: Qu
 
 destroy_quad_plan :: proc(plan: ^Quad_Plan, allocator := context.allocator) {
     context.allocator = allocator
-    destroy_plan4(&plan.sub)
+    destroy_lanes_plan(&plan.sub)
     delete(plan.sub_bins)
     delete(plan.twiddle_re)
     delete(plan.twiddle_im)
@@ -75,15 +76,15 @@ destroy_quad_plan :: proc(plan: ^Quad_Plan, allocator := context.allocator) {
 // N real samples to N/2 bins, bin 0 is (DC, Nyquist)
 run_quad :: proc(plan: ^Quad_Plan, samples: []f32, spectrum: []complex64) {
     assert(len(samples) == plan.size && len(spectrum) == plan.size / 2)
-    run4(&plan.sub, samples, plan.sub_bins)
-    out := cast([^]f32)raw_data(spectrum)
+    run_lanes(&plan.sub, samples, plan.sub_bins)
+    out :=cast([^]f32)raw_data(spectrum)
     combine(plan, out, nil, false)
 }
 
 // N real samples to N/2 bins in two arrays, DC in re[0] and Nyquist in im[0]
 run_quad_arrays :: proc(plan: ^Quad_Plan, samples: []f32, re, im: []f32) {
     assert(len(samples) == plan.size && len(re) == plan.size / 2 && len(im) == plan.size / 2)
-    run4(&plan.sub, samples, plan.sub_bins)
+    run_lanes(&plan.sub, samples, plan.sub_bins)
     combine(plan, raw_data(re), raw_data(im), true)
 }
 

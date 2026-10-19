@@ -22,7 +22,7 @@ RUNS :: 5
 
 Args :: struct {
     plan:     ^fft.Plan,
-    plan4:    ^fft.Plan4,
+    lanes:    ^fft.Lanes_Plan,
     quad:     ^fft.Quad_Plan,
     samples:  []f32,
     spectrum: []complex64,
@@ -52,8 +52,8 @@ main :: proc() {
         defer delete(im)
 
         // Four signals for the four lane FFT, interleaved, and for vDSP's batch one after another
-        plan4 := fft.create_plan4(size)
-        defer fft.destroy_plan4(&plan4)
+        lanes := fft.create_lanes_plan(size)
+        defer fft.destroy_lanes_plan(&lanes)
         interleaved, four_spectra := make_floats(4 * size), make_floats(4 * size)
         defer delete(interleaved)
         defer delete(four_spectra)
@@ -62,7 +62,7 @@ main :: proc() {
         fmt.printf("N = %v, microseconds a transform\n", size)
         row("extreme FFT", best_of(proc(a: ^Args) { fft.run(a.plan, a.samples, a.spectrum) }, &Args{plan = &plan, samples = samples, spectrum = spectrum}))
         row("extreme, arrays", best_of(proc(a: ^Args) { fft.run_arrays(a.plan, a.samples, a.re, a.im) }, &Args{plan = &plan, samples = samples, re = re, im = im}))
-        row("extreme, 4 lanes", best_of(proc(a: ^Args) { fft.run4(a.plan4, a.samples, a.re) }, &Args{plan4 = &plan4, samples = interleaved, re = four_spectra}) / 4)
+        row("lanes", best_of(proc(a: ^Args) { fft.run_lanes(a.lanes, a.samples, a.re) }, &Args{lanes = &lanes, samples = interleaved, re = four_spectra}) / 4)
         quad := fft.create_quad_plan(size)
         defer fft.destroy_quad_plan(&quad)
         row("quad", best_of(proc(a: ^Args) { fft.run_quad(a.quad, a.samples, a.spectrum) }, &Args{quad = &quad, samples = samples, spectrum = spectrum}))

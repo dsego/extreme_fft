@@ -23,15 +23,15 @@ fft.run_arrays(&plan, samples, re, im)
 
 Not scaled. A plan's work buffers are its own, one plan for each thread.
 
-[four.odin](four.odin) does four transforms at once, one in each SIMD lane. The twiddles are the same for all four, so it needs none of the single transform's reshuffles. The four signals come interleaved, sample n of signal t at `samples[4n + t]`, the way four channel audio does, and the bins go out the same way, the four real parts of bin k at `spectrum[8k]` and the four imaginary parts at `spectrum[8k + 4]`:
+[lanes.odin](lanes.odin) does four transforms at once, one in each SIMD lane. The twiddles are the same for all four, so it needs none of the single transform's reshuffles. The four signals come interleaved, sample n of signal t at `samples[4n + t]`, the way four channel audio does, and the bins go out the same way, the four real parts of bin k at `spectrum[8k]` and the four imaginary parts at `spectrum[8k + 4]`:
 
 ```odin
-plan := fft.create_plan4(1024)
-defer fft.destroy_plan4(&plan)
-fft.run4(&plan, interleaved, spectrum) // 4·N floats in, 4·N floats out
+plan := fft.create_lanes_plan(1024)
+defer fft.destroy_lanes_plan(&plan)
+fft.run_lanes(&plan, interleaved, spectrum) // 4·N floats in, 4·N floats out
 ```
 
-[quad.odin](quad.odin) does one transform as four. A signal read four samples at a time is four signals interleaved, x[4i + l] in lane l, so `run4` takes it as it is, and one more pass puts the four quarter length spectra together. The only reshuffle left is a 4×4 transpose in that pass. Faster than `run` at every size, N from 256, same outputs:
+[quad.odin](quad.odin) does one transform as four. A signal read four samples at a time is four signals interleaved, x[4i + l] in lane l, so `run_lanes` takes it as it is, and one more pass puts the four quarter length spectra together. The only reshuffle left is a 4×4 transpose in that pass. Faster than `run` at every size, N from 256, same outputs:
 
 ```odin
 plan := fft.create_quad_plan(4096)
@@ -68,7 +68,7 @@ Against Apple's vDSP on macOS, which takes the samples split into even and odd o
 ➜ odin run benchmark -o:speed -microarch:native
 ```
 
-| N | `run` | `run_arrays` | `run_quad` | `run_quad_arrays` | `run4`, a transform | vDSP FFT | vDSP DFT | vDSP FFT, 4 at once |
+| N | `run` | `run_arrays` | `run_quad` | `run_quad_arrays` | `run_lanes`, a transform | vDSP FFT | vDSP DFT | vDSP FFT, 4 at once |
 |---|---|---|---|---|---|---|---|---|
 | 512 | 0.385 | 0.338 | 0.221 | 0.218 | 0.174 | 0.244 | 0.236 | 0.256 |
 | 1024 | 0.552 | 0.545 | 0.527 | 0.523 | 0.442 | 0.506 | 0.499 | 0.517 |

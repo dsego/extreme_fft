@@ -235,7 +235,7 @@ vDSP pulls ahead from 16384, 10.7 µs there and 26.9 at 32768. A single transfor
 
 #### Four at once
 
-[four.odin](four.odin): four transforms, one in each lane. A twiddle is the same in all four, so every pass is plain arithmetic on whole vectors: no even and odd split, no transpose, no turning lanes around in the split, and no edge bins one at a time. A transform:
+four.odin, since renamed [lanes.odin](lanes.odin) with `run4` as `run_lanes`: four transforms, one in each lane. A twiddle is the same in all four, so every pass is plain arithmetic on whole vectors: no even and odd split, no transpose, no turning lanes around in the split, and no edge bins one at a time. A transform:
 
 | N | `run` | `run4` | vDSP FFT | vDSP DFT | vDSP FFT, 4 at once |
 |---|---|---|---|---|---|

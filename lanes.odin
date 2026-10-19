@@ -27,7 +27,7 @@ import "core:math/bits"
 
 
 // A plan for four transforms of one size. Not for two threads at once, the buffers are the plan's.
-Plan4 :: struct {
+Lanes_Plan :: struct {
     size:        int, // N, real samples of each signal
     half:        int, // N/2, complex points and bins of each
     stages:      []Stage, // all but the last stage, see make_stages
@@ -38,7 +38,7 @@ Plan4 :: struct {
     split_im:    []f32,
 }
 
-create_plan4 :: proc(size: int, allocator := context.allocator) -> (plan: Plan4) {
+create_lanes_plan :: proc(size: int, allocator := context.allocator) -> (plan: Lanes_Plan) {
     assert(bits.is_power_of_two(size) && size >= 64)
     context.allocator = allocator
 
@@ -50,7 +50,7 @@ create_plan4 :: proc(size: int, allocator := context.allocator) -> (plan: Plan4)
     return
 }
 
-destroy_plan4 :: proc(plan: ^Plan4, allocator := context.allocator) {
+destroy_lanes_plan :: proc(plan: ^Lanes_Plan, allocator := context.allocator) {
     context.allocator = allocator
     for stage in plan.stages do delete(stage.twiddles)
     delete(plan.stages)
@@ -60,7 +60,7 @@ destroy_plan4 :: proc(plan: ^Plan4, allocator := context.allocator) {
 }
 
 // Four signals of N samples, interleaved, to their N/2 bins, 8 floats a bin
-run4 :: proc(plan: ^Plan4, samples: []f32, spectrum: []f32) #no_bounds_check {
+run_lanes :: proc(plan: ^Lanes_Plan, samples: []f32, spectrum: []f32) #no_bounds_check {
     assert(len(samples) == 4 * plan.size && len(spectrum) == 4 * plan.size)
 
     first_stage4(plan.stages[0], raw_data(samples), raw_data(plan.buffers[0]))
@@ -153,7 +153,7 @@ radix4_point4 :: #force_inline proc "contextless" (
 */
 
 // The split with a radix-2 last stage, s = N/4: Z[q] = x[q] + x[q+s], Z[q+s] = x[q] - x[q+s]
-radix2_split4 :: proc(plan: ^Plan4, x, out: [^]f32) #no_bounds_check {
+radix2_split4 :: proc(plan: ^Lanes_Plan, x, out: [^]f32) #no_bounds_check {
     s := plan.last_stride
     twiddle_re, twiddle_im := raw_data(plan.split_re), raw_data(plan.split_im)
 
@@ -182,7 +182,7 @@ radix2_split4 :: proc(plan: ^Plan4, x, out: [^]f32) #no_bounds_check {
 
 // The split with a radix-4 last stage, s = N/8. Z[q + j·s] is output j of the butterfly at q,
 // and k = q + j·s pairs with N/2 - k = (s - q) + (3 - j)·s.
-radix4_split4 :: proc(plan: ^Plan4, x, out: [^]f32) #no_bounds_check {
+radix4_split4 :: proc(plan: ^Lanes_Plan, x, out: [^]f32) #no_bounds_check {
     s := plan.last_stride
     half := plan.half
     twiddle_re, twiddle_im := raw_data(plan.split_re), raw_data(plan.split_im)

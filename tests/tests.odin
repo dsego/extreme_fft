@@ -70,7 +70,7 @@ test_run_arrays :: proc(t: ^testing.T) {
 
 // Four signals at once, interleaved, each lane against its own reference
 @(test)
-test_run4 :: proc(t: ^testing.T) {
+test_run_lanes :: proc(t: ^testing.T) {
     for size := 64; size <= 65536; size *= 2 {
         samples := make([]f32, 4 * size)
         defer delete(samples)
@@ -83,11 +83,11 @@ test_run4 :: proc(t: ^testing.T) {
         }
         defer for e in expected do delete(e)
 
-        plan := fft.create_plan4(size)
-        defer fft.destroy_plan4(&plan)
+        plan := fft.create_lanes_plan(size)
+        defer fft.destroy_lanes_plan(&plan)
         spectrum := make([]f32, 4 * size)
         defer delete(spectrum)
-        fft.run4(&plan, samples, spectrum)
+        fft.run_lanes(&plan, samples, spectrum)
 
         got := make([]complex128, size / 2 + 1)
         defer delete(got)
@@ -97,7 +97,7 @@ test_run4 :: proc(t: ^testing.T) {
             got[size / 2] = complex(f64(spectrum[4 + lane]), 0)
             for k in 1 ..< size / 2 do got[k] = complex(f64(spectrum[8 * k + lane]), f64(spectrum[8 * k + 4 + lane]))
             error := relative_error(got, expected[lane])
-            testing.expectf(t, error < TOLERANCE, "run4, N = %v, lane %v: %.2e of the largest bin", size, lane, error)
+            testing.expectf(t, error < TOLERANCE, "run_lanes, N = %v, lane %v: %.2e of the largest bin", size, lane, error)
         }
     }
 }
@@ -308,7 +308,7 @@ Transform :: struct {
 }
 
 // The samples through every way the package has: run and run_arrays, run_quad and run_quad_arrays from
-// 256, and run4 with the samples in all four lanes, lane l times l + 1 and divided back, so a lane
+// 256, and run_lanes with the samples in all four lanes, lane l times l + 1 and divided back, so a lane
 // picking up another's bins shows
 @(private = "file")
 all_transforms :: proc(samples: []f32) -> (results: [dynamic]Transform) {
@@ -360,10 +360,10 @@ all_transforms :: proc(samples: []f32) -> (results: [dynamic]Transform) {
     for x, n in samples {
         for lane in 0 ..< 4 do interleaved[4 * n + lane] = x * f32(lane + 1)
     }
-    plan4 := fft.create_plan4(size)
-    defer fft.destroy_plan4(&plan4)
-    fft.run4(&plan4, interleaved, four)
-    lanes := [4]string{"run4 lane 0", "run4 lane 1", "run4 lane 2", "run4 lane 3"}
+    lanes_plan := fft.create_lanes_plan(size)
+    defer fft.destroy_lanes_plan(&lanes_plan)
+    fft.run_lanes(&lanes_plan, interleaved, four)
+    lanes := [4]string{"run_lanes lane 0", "run_lanes lane 1", "run_lanes lane 2", "run_lanes lane 3"}
     for lane in 0 ..< 4 {
         scale := f64(lane + 1)
         bins := make([]complex128, half + 1)
